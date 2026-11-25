@@ -69,9 +69,9 @@ test("JSON export and mobile responsive layout remain available", () => {
 
 
 const indexedDbFunctions = {
-  open: html.match(/function openDB\\(\\)\\{[^\\n]*\\}/)?.[0],
-  put: html.match(/async function putPDF\\([^\\n]*\\}/)?.[0],
-  get: html.match(/async function getPDF\\([^\\n]*\\}/)?.[0]
+  open: html.match(/function openDB\(\)\{[^\n]*\}/)?.[0],
+  put: html.match(/async function putPDF\([^\n]*\}/)?.[0],
+  get: html.match(/async function getPDF\([^\n]*\}/)?.[0]
 };
 for (const [name, source] of Object.entries(indexedDbFunctions)) {
   assert.ok(source, `IndexedDB ${name} implementation is missing.`);
@@ -125,7 +125,7 @@ function createIndexedDbSandbox() {
   };
   const sandbox = { indexedDB, queueMicrotask };
   vm.runInNewContext(
-    `let dbPromise;\\n${indexedDbFunctions.open}\\n${indexedDbFunctions.put}\\n${indexedDbFunctions.get}\\nglobalThis.api = { putPDF, getPDF };`,
+    `let dbPromise;\n${indexedDbFunctions.open}\n${indexedDbFunctions.put}\n${indexedDbFunctions.get}\nglobalThis.api = { putPDF, getPDF };`,
     sandbox
   );
   return sandbox.api;
