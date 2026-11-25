@@ -77,38 +77,66 @@ for (const [name, source] of Object.entries(indexedDbFunctions)) {
   assert.ok(source, `IndexedDB ${name} implementation is missing.`);
 }
 
-function createIndexedDbSandbox() {
+function createIndexedDbSandbox({ writeError = false, writeAbort = false, readError = false, readAbort = false } = {}) {
   const stored = new Map();
   const database = {
     createObjectStore(name) {
       assert.equal(name, "pdfs");
     },
-    transaction(name) {
+    transaction(name, mode) {
       assert.equal(name, "pdfs");
-      return {
+      const writing = mode === "readwrite";
+      const shouldError = writing && writeError;
+      const shouldAbort = writing ? writeAbort : readAbort;
+      const failure = shouldError
+        ? new Error("IndexedDB write failed")
+        : shouldAbort
+          ? new Error(writing ? "IndexedDB write aborted" : "IndexedDB read aborted")
+          : null;
+      const transaction = {
+        error: failure,
         objectStore(storeName) {
           assert.equal(storeName, "pdfs");
           return {
             put(value, key) {
-              stored.set(key, value);
+              if (!shouldError && !shouldAbort) stored.set(key, value);
             },
             get(key) {
               const request = {};
               queueMicrotask(() => {
-                request.result = stored.get(key);
-                request.onsuccess?.();
+                if (readError) {
+                  request.error = new Error("IndexedDB read failed");
+                  request.onerror?.();
+                  return;
+                }
+                if (!readAbort) {
+                  request.result = stored.get(key);
+                  request.onsuccess?.();
+                }
               });
               return request;
             }
           };
-        },
-        set oncomplete(callback) {
-          queueMicrotask(() => callback?.());
-        },
-        set onerror(callback) {
-          this._onerror = callback;
         }
       };
+      Object.defineProperty(transaction, "oncomplete", {
+        set(callback) {
+          queueMicrotask(() => {
+            if (!shouldError && !shouldAbort) callback?.();
+          });
+        }
+      });
+      Object.defineProperty(transaction, "onerror", {
+        set(callback) {
+          if (shouldError) queueMicrotask(() => callback?.());
+        }
+      });
+      Object.defineProperty(transaction, "onabort", {
+        set(callback) {
+          if (shouldAbort) queueMicrotask(() => callback?.());
+        }
+      });
+      return transaction;
     }
   };
   const indexedDB = {
@@ -125,12 +153,11 @@ function createIndexedDbSandbox() {
   };
   const sandbox = { indexedDB, queueMicrotask };
   vm.runInNewContext(
-    `let dbPromise;\n${indexedDbFunctions.open}\n${indexedDbFunctions.put}\n${indexedDbFunctions.get}\nglobalThis.api = { putPDF, getPDF };`,
+    `let dbPromise;\\n${indexedDbFunctions.open}\\n${indexedDbFunctions.put}\\n${indexedDbFunctions.get}\\nglobalThis.api = { putPDF, getPDF };`,
     sandbox
   );
   return sandbox.api;
 }
-
 test("IndexedDB adapter stores and retrieves PDF bytes", async () => {
   const api = createIndexedDbSandbox();
   const payload = new Uint8Array([37, 80, 68, 70, 45, 49, 46, 55]);
@@ -142,4 +169,25 @@ test("IndexedDB adapter stores and retrieves PDF bytes", async () => {
 test("IndexedDB adapter returns null for a missing PDF key", async () => {
   const api = createIndexedDbSandbox();
   assert.equal(await api.getPDF("missing-script"), null);
+});
+
+
+test("IndexedDB write transaction errors reject the save", async () => {
+  const api = createIndexedDbSandbox({ writeError: true });
+  await assert.rejects(api.putPDF("write-error", new Uint8Array([1])), /IndexedDB write failed/);
+});
+
+test("IndexedDB aborted write transactions reject instead of hanging", async () => {
+  const api = createIndexedDbSandbox({ writeAbort: true });
+  await assert.rejects(api.putPDF("write-abort", new Uint8Array([1])), /IndexedDB write aborted/);
+});
+
+test("IndexedDB read request errors reject the retrieval", async () => {
+  const api = createIndexedDbSandbox({ readError: true });
+  await assert.rejects(api.getPDF("read-error"), /IndexedDB read failed/);
+});
+
+test("IndexedDB aborted read transactions reject instead of hanging", async () => {
+  const api = createIndexedDbSandbox({ readAbort: true });
+  await assert.rejects(api.getPDF("read-abort"), /IndexedDB read aborted/);
 });
