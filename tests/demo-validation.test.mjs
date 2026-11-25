@@ -261,3 +261,54 @@ test("embedded fictional sample PDF decodes to the expected anonymous one-page s
     assert.ok(pdfSource.includes(marker), `Sample PDF is missing expected fictional content: ${marker}`);
   }
 });
+
+
+test("JSON export excludes raw PDF payload while preserving anonymous valuation data", async () => {
+  const binding = html.match(/\\$\\('exportAll'\\)\\.onclick=\\(\\)=>\\{[\\s\\S]*?\\};/);
+  assert.ok(binding, "JSON export handler is missing.");
+
+  const button = {};
+  let exportedBlob;
+  let downloaded;
+  let clicked = false;
+  const anchor = {
+    set href(value) { this._href = value; },
+    get href() { return this._href; },
+    set download(value) { downloaded = value; },
+    click() { clicked = true; }
+  };
+  const sandbox = {
+    records: [{
+      id: "sdvs-demo-script-001",
+      code: "SDVS-DEMO-001",
+      fileData: "data:application/pdf;base64,SHOULD_NOT_EXPORT",
+      pdfKey: "sdvs-demo-script-001",
+      subject: "Mathematics (Demo)",
+      status: "Evaluated",
+      total: 8,
+      questions: [{ name: "Question 1", mark: "8", max: 10 }]
+    }],
+    Blob,
+    URL: {
+      createObjectURL(blob) { exportedBlob = blob; return "blob:sdvs-test"; },
+      revokeObjectURL() {}
+    },
+    document: { createElement(tag) { assert.equal(tag, "a"); return anchor; } },
+    toast() {},
+    $: id => id === "exportAll" ? button : {}
+  };
+
+  vm.runInNewContext(binding[0], sandbox);
+  button.onclick();
+
+  assert.equal(downloaded, "sdvs-valuation-export.json");
+  assert.equal(clicked, true);
+  assert.ok(exportedBlob, "Export must create a JSON blob.");
+  const exported = JSON.parse(await exportedBlob.text());
+  assert.equal(exported.system, "SDVS local prototype");
+  assert.equal(exported.records[0].code, "SDVS-DEMO-001");
+  assert.equal(exported.records[0].status, "Evaluated");
+  assert.equal(exported.records[0].total, 8);
+  assert.equal(Object.hasOwn(exported.records[0], "fileData"), false);
+  assert.ok(!JSON.stringify(exported).includes("SHOULD_NOT_EXPORT"));
+});
