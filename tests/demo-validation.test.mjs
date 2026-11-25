@@ -214,14 +214,19 @@ test("Pages deployment waits for the fresh artifact to become API-visible", () =
 
 
 test("admin API URL normalization removes a trailing slash", () => {
-  const start = adminHtml.indexOf("function url(path){");
-  const end = adminHtml.indexOf("\\n", start);
-  const helper = adminHtml.slice(start, end);
-  assert.ok(helper.includes("replace(/\\\\/$/,'')"), "API URL helper must remove a trailing slash.");
-  assert.equal(adminHtml.split("replace(/\\\\/$/,'')").length - 1, 3, "All API URL inputs must use the same normalization.");
+  const helper = adminHtml.match(/function url\\(path\\)\\{[^}]*\\}/)?.[0];
+  assert.ok(helper, "Admin API URL helper is missing.");
+  const normalization = String.raw`replace(/\\/$/,'')`;
+  assert.ok(helper.includes(normalization), "API URL helper must remove a trailing slash.");
+  assert.equal(adminHtml.split(normalization).length - 1, 3, "All API URL inputs must use the same normalization.");
+
   const sandbox = {};
   vm.runInNewContext(`let api = "https://api.example.test/"; ${helper}; globalThis.buildUrl = url;`, sandbox);
   assert.equal(sandbox.buildUrl("/health"), "https://api.example.test/health");
+
+  const unconfigured = {};
+  vm.runInNewContext(`let api = ""; ${helper}; globalThis.buildUrl = url;`, unconfigured);
+  assert.throws(() => unconfigured.buildUrl("/health"), /Set the SDVS API URL first/);
 });
 
 test("admin portal preserves master-admin gating, server authorization, and safe session handling", () => {
