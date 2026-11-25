@@ -246,7 +246,7 @@ def request_otp(body: OTPRequestIn, db: Session = Depends(get_db)):
     if not profile: raise HTTPException(404,"This email is not registered. Contact the SDVS master administrator.")
     user=db.get(User,profile.user_id)
     if not user or not user.active: raise HTTPException(403,"This account is inactive.")
-    recent=db.scalar(select(func.count(OTPChallenge.id)).where(OTPChallenge.user_id==user.id,
+    recent=db.scalar(select(func.count(OTPChallenge.id)).where(OTPChallenge.user_id==user.id, OTPChallenge.channel=="email",
         OTPChallenge.created_at >= datetime.now(timezone.utc)-__import__('datetime').timedelta(seconds=60)))
     if recent and recent>=2: raise HTTPException(429,"Please wait 60 seconds before requesting another OTP.")
     email_code=f"{secrets.randbelow(1000000):06d}"
@@ -304,8 +304,8 @@ def admin_users(db:Session=Depends(get_db),user:User=Depends(require_roles("SUPE
 @app.post("/admin/users")
 def admin_create_user(body:AdminUserCreateIn,db:Session=Depends(get_db),user:User=Depends(require_roles("SUPER_ADMIN"))):
     name=body.full_name.strip();email=body.email.strip().lower();phone=body.phone.strip()
-    if not re.fullmatch(r"[^@\\s]+@[^@\\s]+\\.[^@\\s]+",email): raise HTTPException(422,"Enter a valid email address.")
-    if not re.fullmatch(r"\\+[1-9]\\d{7,14}",phone): raise HTTPException(422,"Phone must use international format, e.g. +919876543210.")
+    if not re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+",email): raise HTTPException(422,"Enter a valid email address.")
+    if not re.fullmatch(r"\+[1-9]\d{7,14}",phone): raise HTTPException(422,"Phone must use international format, e.g. +919876543210.")
     try: role=Role(body.role)
     except ValueError: raise HTTPException(422,"Invalid role.")
     if role==Role.SUPER_ADMIN and user.role!=Role.SUPER_ADMIN: raise HTTPException(403,"Only master admin can create administrators.")
