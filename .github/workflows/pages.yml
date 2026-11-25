@@ -26,9 +26,11 @@ jobs:
       - name: Configure Pages
         uses: actions/configure-pages@v5
       - name: Remove stale Pages artifacts from earlier attempts
+        id: cleanup-artifacts
         uses: actions/github-script@v7
         with:
           script: |
+            core.setOutput("artifact_cutoff", new Date().toISOString());
             const { data } = await github.rest.actions.listWorkflowRunArtifacts({
               owner: context.repo.owner,
               repo: context.repo.repo,
@@ -45,6 +47,39 @@ jobs:
         uses: actions/upload-pages-artifact@v3
         with:
           path: docs
+      - name: Wait for fresh Pages artifact to become visible
+        uses: actions/github-script@v7
+        env:
+          SDVS_PAGES_ARTIFACT_CUTOFF: ${{ steps.cleanup-artifacts.outputs.artifact_cutoff }}
+        with:
+          script: |
+            const cutoff = Date.parse(process.env.SDVS_PAGES_ARTIFACT_CUTOFF);
+            if (!Number.isFinite(cutoff)) {
+              throw new Error("Pages artifact visibility cutoff is missing or invalid.");
+            }
+            for (let attempt = 1; attempt <= 20; attempt += 1) {
+              const { data } = await github.rest.actions.listWorkflowRunArtifacts({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                run_id: context.runId,
+                per_page: 100,
+              });
+              const freshArtifacts = data.artifacts.filter(artifact =>
+                artifact.name === "github-pages" &&
+                !artifact.expired &&
+                Date.parse(artifact.created_at) >= cutoff
+              );
+              if (freshArtifacts.length === 1) {
+                core.info(`Fresh Pages artifact ${freshArtifacts[0].id} is visible.`);
+                return;
+              }
+              if (freshArtifacts.length > 1) {
+                throw new Error(`Expected one fresh github-pages artifact, found ${freshArtifacts.length}.`);
+              }
+              core.info(`Fresh Pages artifact is not visible yet (attempt ${attempt}/20); retrying in 3 seconds.`);
+              await new Promise(resolve => setTimeout(resolve, 3000));
+            }
+            throw new Error("Fresh github-pages artifact did not become visible after 20 checks.");
       - name: Deploy to GitHub Pages
         id: deployment
         uses: actions/deploy-pages@v4
