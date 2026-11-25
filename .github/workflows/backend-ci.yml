@@ -25,14 +25,14 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - name: Install backend dependencies
+      - name: Install backend and test dependencies
         working-directory: backend
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements.txt
+          pip install -r requirements-test.txt
       - name: Compile Python modules
         working-directory: backend
-        run: python -m compileall -q app
+        run: python -m compileall -q app tests
       - name: Import API and inspect routes
         working-directory: backend
         env:
@@ -53,3 +53,9 @@ jobs:
           assert get_object(key) == b"sdvs-ci-roundtrip"
           print("Local storage adapter round-trip passed.")
           PY
+      - name: Run backend authorization integration tests
+        working-directory: backend
+        env:
+          JWT_SECRET: ci-only-secret-not-for-production
+          OTP_SECRET: ci-only-otp-secret
+        run: python -m unittest discover -s tests -v
