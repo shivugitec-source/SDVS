@@ -254,5 +254,68 @@ class AdminAuthorizationTests(unittest.TestCase):
             self.assertEqual(replay.json()["detail"], "Request a new OTP first.")
 
 
+    def test_expired_otp_is_rejected_even_when_the_code_matches(self):
+        email = "master-a@example.test"
+        batch_id = "otp-expired-test-0001"
+        expires_at = datetime.now(timezone.utc) - timedelta(minutes=1)
+        with self.SessionLocal() as db:
+            db.add(OTPChallenge(
+                user_id=self.master_id,
+                batch_id=batch_id,
+                channel="email",
+                code_hash=otp_digest("778899"),
+                expires_at=expires_at,
+            ))
+            db.commit()
+
+        response = self.client.post(
+            "/auth/verify-otp",
+            json={"email": email, "channel": "email", "code": "778899"},
+        )
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.json()["detail"], "OTP expired. Request a new one.")
+
+        with self.SessionLocal() as db:
+            challenge = db.query(OTPChallenge).filter_by(batch_id=batch_id).one()
+            self.assertFalse(challenge.consumed)
+            self.assertEqual(challenge.attempts, 0)
+
+    def test_otp_is_locked_after_five_incorrect_attempts(self):
+        email = "master-a@example.test"
+        batch_id = "otp-attempt-limit-test-0001"
+        expires_at = datetime.now(timezone.utc) + timedelta(minutes=5)
+        with self.SessionLocal() as db:
+            db.add(OTPChallenge(
+                user_id=self.master_id,
+                batch_id=batch_id,
+                channel="email",
+                code_hash=otp_digest("999999"),
+                expires_at=expires_at,
+            ))
+            db.commit()
+
+        for attempt in range(5):
+            response = self.client.post(
+                "/auth/verify-otp",
+                json={"email": email, "channel": "email", "code": "000000"},
+            )
+            self.assertEqual(response.status_code, 400, f"Incorrect attempt {attempt + 1} should be rejected.")
+
+        locked_response = self.client.post(
+            "/auth/verify-otp",
+            json={"email": email, "channel": "email", "code": "999999"},
+        )
+        self.assertEqual(locked_response.status_code, 429)
+        self.assertEqual(
+            locked_response.json()["detail"],
+            "Too many incorrect attempts. Request a new OTP.",
+        )
+
+        with self.SessionLocal() as db:
+            challenge = db.query(OTPChallenge).filter_by(batch_id=batch_id).one()
+            self.assertEqual(challenge.attempts, 5)
+            self.assertFalse(challenge.consumed)
+
+
 if __name__ == "__main__":
     unittest.main()
