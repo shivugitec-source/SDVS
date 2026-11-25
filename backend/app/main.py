@@ -16,8 +16,8 @@ from .config import settings
 from .auth_delivery import send_email_otp, send_sms_otp
 
 app = FastAPI(title="Shivashirwad Digital Valuation System API", version="0.2.0")
-app.add_middleware(CORSMiddleware, allow_origins=["http://localhost:5173"], allow_credentials=True,
-                   allow_methods=["GET", "POST"], allow_headers=["Authorization", "Content-Type"])
+app.add_middleware(CORSMiddleware, allow_origins=["http://localhost:5173"], allow_origin_regex=r"https://shivugitec-source\.github\.io", allow_credentials=False,
+                   allow_methods=["GET", "POST", "PATCH", "OPTIONS"], allow_headers=["Authorization", "Content-Type"])
 
 @app.on_event("startup")
 def startup():
@@ -27,16 +27,24 @@ def startup():
         with SessionLocal() as db:
             inst = db.scalar(select(Institution).where(Institution.code == "DEMO"))
             if not inst:
-                inst = Institution(name="Demo University", code="DEMO")
+                inst = Institution(name="Shivashirwad SDVS", code="DEMO")
                 db.add(inst); db.flush()
+            master = db.scalar(select(User).where(User.institution_id == inst.id,
+                                                   User.username == settings.bootstrap_username))
+            if not master:
                 master = User(institution_id=inst.id, username=settings.bootstrap_username,
-                            password_hash=hash_password(settings.bootstrap_password), role=Role.SUPER_ADMIN)
+                              password_hash=hash_password(settings.bootstrap_password), role=Role.SUPER_ADMIN)
                 db.add(master); db.flush()
-                if settings.bootstrap_email and settings.bootstrap_phone:
+            if settings.bootstrap_email and settings.bootstrap_phone:
+                profile = db.scalar(select(UserProfile).where(UserProfile.user_id == master.id))
+                if not profile:
+                    if db.scalar(select(UserProfile).where((UserProfile.email == settings.bootstrap_email.strip().lower()) |
+                                                            (UserProfile.phone == settings.bootstrap_phone.strip()))):
+                        raise RuntimeError("Master admin email or phone is already assigned to another account.")
                     db.add(UserProfile(user_id=master.id, full_name=settings.bootstrap_name,
                                        email=settings.bootstrap_email.strip().lower(),
                                        phone=settings.bootstrap_phone.strip()))
-                db.commit()
+            db.commit()
 
 def audit(db, user, action, entity_type, entity_id, detail=None):
     db.add(AuditEvent(institution_id=user.institution_id, actor_id=user.id, action=action,
@@ -48,10 +56,7 @@ def health(): return {"status": "ok", "service": "sdvs-api"}
 
 @app.post("/auth/login", response_model=TokenOut)
 def login(body: LoginIn, db: Session = Depends(get_db)):
-    user = db.scalar(select(User).where(User.username == body.username, User.active == True))
-    if not user or not verify_password(body.password, user.password_hash):
-        raise HTTPException(401, "Incorrect username or password")
-    return {"access_token": create_token(user)}
+    raise HTTPException(410, "Password-only login is disabled. Use email and mobile OTP verification.")
 
 @app.get("/admin/dashboard")
 def admin_dashboard(db: Session = Depends(get_db), user: User = Depends(require_roles("SUPER_ADMIN", "EXAM_CONTROLLER"))):
@@ -246,9 +251,10 @@ def request_otp(body: OTPRequestIn, db: Session = Depends(get_db)):
     if recent and recent>=2: raise HTTPException(429,"Please wait 60 seconds before requesting another OTP.")
     email_code=f"{secrets.randbelow(1000000):06d}"
     phone_code=f"{secrets.randbelow(1000000):06d}"
+    batch_id=secrets.token_urlsafe(24)
     expiry=datetime.now(timezone.utc)+__import__('datetime').timedelta(minutes=settings.otp_ttl_minutes)
-    db.add_all([OTPChallenge(user_id=user.id,channel="email",code_hash=otp_digest(email_code),expires_at=expiry),
-                OTPChallenge(user_id=user.id,channel="phone",code_hash=otp_digest(phone_code),expires_at=expiry)])
+    db.add_all([OTPChallenge(user_id=user.id,batch_id=batch_id,channel="email",code_hash=otp_digest(email_code),expires_at=expiry),
+                OTPChallenge(user_id=user.id,batch_id=batch_id,channel="phone",code_hash=otp_digest(phone_code),expires_at=expiry)])
     db.commit()
     send_email_otp(profile.email,email_code)
     send_sms_otp(profile.phone,phone_code)
@@ -277,8 +283,9 @@ def verify_otp(body: OTPVerifyIn, db: Session = Depends(get_db)):
     if channel=="email": profile.email_verified=True
     else: profile.phone_verified=True
     db.commit()
-    if profile.email_verified and profile.phone_verified:
-        return {"verified":True,"access_token":create_token(user),"token_type":"bearer",
+    pair=db.scalars(select(OTPChallenge).where(OTPChallenge.user_id==user.id,OTPChallenge.batch_id==challenge.batch_id)).all()
+    if len(pair)==2 and all(item.consumed for item in pair):
+        return {"verified":True,"both_channels_verified":True,"access_token":create_token(user),"token_type":"bearer",
                 "user":{"id":user.id,"name":profile.full_name,"email":profile.email,"phone":profile.phone,"role":user.role.value}}
     return {"verified":True,"both_channels_verified":False,"next_channel":"phone" if channel=="email" else "email"}
 
