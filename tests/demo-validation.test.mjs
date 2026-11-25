@@ -202,10 +202,10 @@ test("Pages deployment waits for the fresh artifact to become API-visible", () =
   assert.ok(cleanupIndex >= 0 && cleanupIndex < uploadIndex, "Artifact cleanup must precede upload.");
   assert.ok(uploadIndex >= 0 && uploadIndex < waitIndex, "Artifact visibility polling must follow upload.");
   assert.ok(waitIndex >= 0 && waitIndex < deployIndex, "Artifact visibility polling must precede deployment.");
-  assert.match(pagesWorkflow, /core\\.setOutput\\("artifact_cutoff", new Date\\(\\)\\.toISOString\\(\\)\\)/);
+  assert.ok(pagesWorkflow.includes('core.setOutput("artifact_cutoff", new Date().toISOString())'));
   assert.ok(pagesWorkflow.includes("steps.cleanup-artifacts.outputs.artifact_cutoff"));
   assert.match(pagesWorkflow, /listWorkflowRunArtifacts/);
-  assert.match(pagesWorkflow, /Date\\.parse\\(artifact\\.created_at\\) >= cutoff/);
-  assert.match(pagesWorkflow, /attempt <= 20/);
-  assert.match(pagesWorkflow, /setTimeout\\(resolve, 3000\\)/);
+  assert.ok(pagesWorkflow.includes("Date.parse(artifact.created_at) >= cutoff"));
+  assert.ok(pagesWorkflow.includes("attempt <= 20"));
+  assert.ok(pagesWorkflow.includes("setTimeout(resolve, 3000)"));
 });
