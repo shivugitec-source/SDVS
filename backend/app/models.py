@@ -62,6 +62,7 @@ class OTPChallenge(Base):
  __tablename__="otp_challenges"
  id:Mapped[str]=mapped_column(String,primary_key=True,default=uid)
  user_id:Mapped[str]=mapped_column(ForeignKey("users.id"),index=True)
+ batch_id:Mapped[str]=mapped_column(String(36),index=True)
  channel:Mapped[str]=mapped_column(String(10))
  code_hash:Mapped[str]=mapped_column(String(64))
  expires_at:Mapped[datetime]=mapped_column(DateTime(timezone=True))
