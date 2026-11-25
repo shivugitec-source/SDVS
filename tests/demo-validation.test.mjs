@@ -214,9 +214,9 @@ test("Pages deployment waits for the fresh artifact to become API-visible", () =
 
 
 test("admin API URL normalization removes a trailing slash", () => {
-  const helper = adminHtml.match(/function url\\(path\\)\\{[^}]*\\}/)?.[0];
+  const helper = adminHtml.match(/function url\(path\)\{[^}]*\}/)?.[0];
   assert.ok(helper, "Admin API URL helper is missing.");
-  const normalization = String.raw`replace(/\\/$/,'')`;
+  const normalization = String.raw`replace(/\/$/,'')`;
   assert.ok(helper.includes(normalization), "API URL helper must remove a trailing slash.");
   assert.equal(adminHtml.split(normalization).length - 1, 3, "All API URL inputs must use the same normalization.");
 
