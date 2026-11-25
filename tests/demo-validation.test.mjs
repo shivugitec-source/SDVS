@@ -153,7 +153,7 @@ function createIndexedDbSandbox({ writeError = false, writeAbort = false, readEr
   };
   const sandbox = { indexedDB, queueMicrotask };
   vm.runInNewContext(
-    `let dbPromise;\\n${indexedDbFunctions.open}\\n${indexedDbFunctions.put}\\n${indexedDbFunctions.get}\\nglobalThis.api = { putPDF, getPDF };`,
+    `let dbPromise;\n${indexedDbFunctions.open}\n${indexedDbFunctions.put}\n${indexedDbFunctions.get}\nglobalThis.api = { putPDF, getPDF };`,
     sandbox
   );
   return sandbox.api;
