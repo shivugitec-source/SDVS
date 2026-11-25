@@ -5,6 +5,7 @@ import vm from "node:vm";
 
 const html = await readFile(new URL("../docs/index.html", import.meta.url), "utf8");
 const pagesWorkflow = await readFile(new URL("../.github/workflows/pages.yml", import.meta.url), "utf8");
+const adminHtml = await readFile(new URL("../docs/admin.html", import.meta.url), "utf8");
 const validator = html.match(/function hasInvalidMarks\(list\)\s*\{[^\n]*\}/);
 assert.ok(validator, "Question mark validation helper is missing.");
 
@@ -208,4 +209,16 @@ test("Pages deployment waits for the fresh artifact to become API-visible", () =
   assert.ok(pagesWorkflow.includes("Date.parse(artifact.created_at) >= cutoff"));
   assert.ok(pagesWorkflow.includes("attempt <= 20"));
   assert.ok(pagesWorkflow.includes("setTimeout(resolve, 3000)"));
+});
+
+
+test("admin portal keeps master-admin gating and safe session handling", () => {
+  assert.match(adminHtml, /if\\(d\\.user\\?\\.role!=='SUPER_ADMIN'\\)/);
+  assert.match(adminHtml, /function esc\\(s\\)/);
+  assert.ok(adminHtml.includes("esc(u.name)"));
+  assert.ok(adminHtml.includes("esc(u.role)"));
+  assert.ok(adminHtml.includes("esc(u.email||'—')"));
+  assert.ok(adminHtml.includes("esc(u.phone||'—')"));
+  assert.ok(adminHtml.includes("sessionStorage.setItem('sdvs_token',token)"));
+  assert.ok(!adminHtml.includes("localStorage.setItem('sdvs_token'"));
 });

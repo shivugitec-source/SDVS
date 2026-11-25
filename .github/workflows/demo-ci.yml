@@ -62,16 +62,20 @@ jobs:
                       self.active = False
 
           source = Path("index.html").read_text(encoding="utf-8")
-          parser = Scripts()
-          parser.feed(source)
-          assert parser.scripts, "No inline JavaScript found in docs/index.html"
-          for index, script in enumerate(parser.scripts, 1):
-              Path(f"/tmp/sdvs-inline-{index}.js").write_text(script, encoding="utf-8")
+          extracted = 0
+          for page in (Path("index.html"), Path("admin.html")):
+              parser = Scripts()
+              parser.feed(page.read_text(encoding="utf-8"))
+              assert parser.scripts, f"No inline JavaScript found in {page}"
+              for index, script in enumerate(parser.scripts, 1):
+                  Path(f"/tmp/sdvs-{page.stem}-inline-{index}.js").write_text(script, encoding="utf-8")
+                  extracted += 1
+              print(f"Extracted {len(parser.scripts)} inline script(s) from {page}.")
           assert "loadDemoSample" in source, "Demo sample loader is missing"
           assert "Load demo sample" in source, "Demo sample entry point is missing"
-          print(f"Extracted {len(parser.scripts)} inline script(s).")
+          print(f"Extracted {extracted} inline script(s) across dashboard and admin pages.")
           PY
-          for file in /tmp/sdvs-inline-*.js; do
+          for file in /tmp/sdvs-*-inline-*.js; do
             node --check "$file"
           done
       - name: Validate embedded demo PDF
