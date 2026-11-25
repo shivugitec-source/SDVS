@@ -46,4 +46,10 @@ jobs:
           missing = required - paths
           assert not missing, f"Missing API routes: {sorted(missing)}"
           print(f"Imported SDVS API successfully; {len(paths)} routes registered.")
+          from app.storage import put_object, get_object, check_storage
+          assert check_storage() == "local"
+          key = "ci-storage-roundtrip.txt"
+          put_object(key, b"sdvs-ci-roundtrip", "text/plain")
+          assert get_object(key) == b"sdvs-ci-roundtrip"
+          print("Local storage adapter round-trip passed.")
           PY
