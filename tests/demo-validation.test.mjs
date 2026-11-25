@@ -264,7 +264,7 @@ test("embedded fictional sample PDF decodes to the expected anonymous one-page s
 
 
 test("JSON export excludes raw PDF payload while preserving anonymous valuation data", async () => {
-  const binding = html.match(/\\$\\('exportAll'\\)\\.onclick=\\(\\)=>\\{[\\s\\S]*?\\};/);
+  const binding = html.match(/\$\('exportAll'\)\.onclick=\(\)=>\{[\s\S]*?\};/);
   assert.ok(binding, "JSON export handler is missing.");
 
   const button = {};
