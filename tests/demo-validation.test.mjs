@@ -244,3 +244,20 @@ test("admin portal preserves master-admin gating, server authorization, and safe
   assert.ok(backendMain.includes('def admin_create_user(body:AdminUserCreateIn,db:Session=Depends(get_db),user:User=Depends(require_roles("SUPER_ADMIN"))):'));
   assert.ok(backendMain.includes('def admin_set_user_active(user_id:str,active:bool,db:Session=Depends(get_db),user:User=Depends(require_roles("SUPER_ADMIN"))):'));
 });
+
+test("embedded fictional sample PDF decodes to the expected anonymous one-page script", () => {
+  const match = html.match(/const DEMO_PDF_B64="([A-Za-z0-9+/=]+)"/);
+  assert.ok(match, "Embedded demo PDF payload is missing.");
+  const bytes = Buffer.from(match[1], "base64");
+  assert.equal(bytes.subarray(0, 5).toString("ascii"), "%PDF-", "Sample payload must decode as a PDF.");
+  const pdfSource = bytes.toString("latin1");
+  assert.match(pdfSource, /\/Type\s*\/Page\b/, "Sample PDF must contain a page object.");
+  for (const marker of [
+    "SDVS DEMONSTRATION ANSWER SCRIPT",
+    "Anonymous Script Code: SDVS-DEMO-001",
+    "Subject: Mathematics",
+    "Synthetic sample only. Not a real candidate script."
+  ]) {
+    assert.ok(pdfSource.includes(marker), `Sample PDF is missing expected fictional content: ${marker}`);
+  }
+});
