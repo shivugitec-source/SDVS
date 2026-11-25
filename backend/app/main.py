@@ -292,6 +292,7 @@ def verify_otp(body: OTPVerifyIn, db: Session = Depends(get_db)):
     profile=db.scalar(select(UserProfile).where(UserProfile.email==email))
     if not profile: raise HTTPException(404,"Account not found.")
     user=db.get(User,profile.user_id)
+    if not user or not user.active: raise HTTPException(403,"This account is inactive.")
     challenge=db.scalar(select(OTPChallenge).where(OTPChallenge.user_id==user.id,
         OTPChallenge.channel==channel,OTPChallenge.consumed==False).order_by(OTPChallenge.created_at.desc()))
     if not challenge: raise HTTPException(400,"Request a new OTP first.")

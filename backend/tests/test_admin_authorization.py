@@ -9,8 +9,8 @@ from sqlalchemy.pool import StaticPool
 
 from app.config import settings
 from app.db import Base, get_db
-from app.main import app
-from app.models import Institution, Role, User, UserProfile
+from app.main import app, otp_digest
+from app.models import Institution, OTPChallenge, Role, User, UserProfile
 from app.security import create_token
 
 
@@ -162,6 +162,38 @@ class AdminAuthorizationTests(unittest.TestCase):
             headers={"Authorization": f"Bearer {self.inactive_token}"},
         )
         self.assertEqual(response.status_code, 401)
+
+
+    def test_deactivated_account_cannot_complete_an_existing_otp_challenge(self):
+        email = "inactive-master@example.test"
+        batch_id = "inactive-otp-test"
+        expires_at = datetime.now(timezone.utc) + timedelta(minutes=5)
+        with self.SessionLocal() as db:
+            db.add_all([
+                OTPChallenge(
+                    user_id=self.inactive_master_id,
+                    batch_id=batch_id,
+                    channel="email",
+                    code_hash=otp_digest("123456"),
+                    expires_at=expires_at,
+                ),
+                OTPChallenge(
+                    user_id=self.inactive_master_id,
+                    batch_id=batch_id,
+                    channel="phone",
+                    code_hash=otp_digest("654321"),
+                    expires_at=expires_at,
+                    consumed=True,
+                ),
+            ])
+            db.commit()
+
+        response = self.client.post(
+            "/auth/verify-otp",
+            json={"email": email, "channel": "email", "code": "123456"},
+        )
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(response.json()["detail"], "This account is inactive.")
 
 
 if __name__ == "__main__":
