@@ -25,7 +25,7 @@ def _client():
 def put_object(key: str, content: bytes, content_type: str = "application/pdf") -> None:
     if r2_enabled():
         _client().put_object(Bucket=settings.r2_bucket_name, Key=key, Body=content,
-                             ContentType=content_type, ServerSideEncryption="AES256")
+                             ContentType=content_type)
         return
     if settings.require_r2:
         raise RuntimeError("R2 is required but its credentials are not configured.")
