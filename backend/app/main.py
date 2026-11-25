@@ -6,7 +6,7 @@ from fastapi import FastAPI, Depends, HTTPException, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
-from sqlalchemy import select, func
+from sqlalchemy import select, func, text
 from pypdf import PdfReader, PdfWriter
 from .db import Base, engine, get_db, SessionLocal
 from .models import *
@@ -26,6 +26,8 @@ def startup():
         raise RuntimeError("JWT_SECRET must be a private random value of at least 32 characters.")
     if len(settings.otp_secret) < 32:
         raise RuntimeError("OTP_SECRET must be a private random value of at least 32 characters.")
+    if settings.dev_bootstrap and not all([settings.bootstrap_password, settings.bootstrap_email, settings.bootstrap_phone]):
+        raise RuntimeError("DEV_BOOTSTRAP requires BOOTSTRAP_PASSWORD, BOOTSTRAP_EMAIL and BOOTSTRAP_PHONE.")
     check_storage()
     Base.metadata.create_all(bind=engine)
     if settings.dev_bootstrap:
@@ -60,7 +62,7 @@ def audit(db, user, action, entity_type, entity_id, detail=None):
 def health():
     try:
         with engine.connect() as connection:
-            connection.execute(__import__("sqlalchemy").text("SELECT 1"))
+            connection.execute(text("SELECT 1"))
         storage = check_storage()
         return {"status": "ok", "service": "sdvs-api", "database": "ok", "storage": storage}
     except Exception:
