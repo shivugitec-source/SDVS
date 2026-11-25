@@ -48,3 +48,23 @@ class QuestionMark(Base):
 class AuditEvent(Base):
  __tablename__="audit_events"
  id:Mapped[str]=mapped_column(String,primary_key=True,default=uid);institution_id:Mapped[str]=mapped_column(String,index=True);actor_id:Mapped[str]=mapped_column(String,index=True);action:Mapped[str]=mapped_column(String(100));entity_type:Mapped[str]=mapped_column(String(80));entity_id:Mapped[str]=mapped_column(String(80));detail:Mapped[str]=mapped_column(Text,default="{}");created_at:Mapped[datetime]=mapped_column(DateTime(timezone=True),default=now)
+
+class UserProfile(Base):
+ __tablename__="user_profiles"
+ id:Mapped[str]=mapped_column(String,primary_key=True,default=uid)
+ user_id:Mapped[str]=mapped_column(ForeignKey("users.id"),unique=True,index=True)
+ full_name:Mapped[str]=mapped_column(String(200))
+ email:Mapped[str]=mapped_column(String(254),unique=True,index=True)
+ phone:Mapped[str]=mapped_column(String(20),unique=True,index=True)
+ email_verified:Mapped[bool]=mapped_column(Boolean,default=False)
+ phone_verified:Mapped[bool]=mapped_column(Boolean,default=False)
+class OTPChallenge(Base):
+ __tablename__="otp_challenges"
+ id:Mapped[str]=mapped_column(String,primary_key=True,default=uid)
+ user_id:Mapped[str]=mapped_column(ForeignKey("users.id"),index=True)
+ channel:Mapped[str]=mapped_column(String(10))
+ code_hash:Mapped[str]=mapped_column(String(64))
+ expires_at:Mapped[datetime]=mapped_column(DateTime(timezone=True))
+ attempts:Mapped[int]=mapped_column(Integer,default=0)
+ consumed:Mapped[bool]=mapped_column(Boolean,default=False)
+ created_at:Mapped[datetime]=mapped_column(DateTime(timezone=True),default=now)
