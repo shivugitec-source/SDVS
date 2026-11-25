@@ -4,11 +4,13 @@ on:
     branches: [main]
     paths:
       - "docs/**"
+      - "tests/**"
       - ".github/workflows/demo-ci.yml"
   pull_request:
     branches: [main]
     paths:
       - "docs/**"
+      - "tests/**"
       - ".github/workflows/demo-ci.yml"
   workflow_dispatch:
 
@@ -89,3 +91,5 @@ jobs:
           assert len(pdf) > 300, "Demo PDF payload is unexpectedly small"
           print(f"Embedded demo PDF looks structurally valid ({len(pdf)} bytes).")
           PY
+      - name: Test demo workflow contracts and mark validation
+        run: node --test tests/demo-validation.test.mjs
