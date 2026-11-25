@@ -45,3 +45,13 @@ services:
         sync: false
       - key: STORAGE_DIR
         value: /tmp/sdvs-uploads
+      - key: REQUIRE_R2
+        value: "true"
+      - key: R2_ENDPOINT_URL
+        sync: false
+      - key: R2_ACCESS_KEY_ID
+        sync: false
+      - key: R2_SECRET_ACCESS_KEY
+        sync: false
+      - key: R2_BUCKET_NAME
+        sync: false
