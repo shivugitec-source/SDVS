@@ -1,0 +1,91 @@
+name: SDVS demo validation
+on:
+  push:
+    branches: [main]
+    paths:
+      - "docs/**"
+      - ".github/workflows/demo-ci.yml"
+  pull_request:
+    branches: [main]
+    paths:
+      - "docs/**"
+      - ".github/workflows/demo-ci.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  validate-demo:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Extract and syntax-check inline JavaScript
+        working-directory: docs
+        run: |
+          python - <<'PY'
+          from html.parser import HTMLParser
+          from pathlib import Path
+
+          class Scripts(HTMLParser):
+              def __init__(self):
+                  super().__init__()
+                  self.active = False
+                  self.parts = []
+                  self.scripts = []
+
+              def handle_starttag(self, tag, attrs):
+                  if tag.lower() == "script":
+                      attrs = dict(attrs)
+                      if "src" not in attrs:
+                          self.active = True
+                          self.parts = []
+
+              def handle_data(self, data):
+                  if self.active:
+                      self.parts.append(data)
+
+              def handle_endtag(self, tag):
+                  if tag.lower() == "script" and self.active:
+                      self.scripts.append("".join(self.parts))
+                      self.active = False
+
+          source = Path("index.html").read_text(encoding="utf-8")
+          parser = Scripts()
+          parser.feed(source)
+          assert parser.scripts, "No inline JavaScript found in docs/index.html"
+          for index, script in enumerate(parser.scripts, 1):
+              Path(f"/tmp/sdvs-inline-{index}.js").write_text(script, encoding="utf-8")
+          assert "loadDemoSample" in source, "Demo sample loader is missing"
+          assert "Load demo sample" in source, "Demo sample entry point is missing"
+          print(f"Extracted {len(parser.scripts)} inline script(s).")
+          PY
+          for file in /tmp/sdvs-inline-*.js; do
+            node --check "$file"
+          done
+      - name: Validate embedded demo PDF
+        working-directory: docs
+        run: |
+          python - <<'PY'
+          import base64
+          import re
+          from pathlib import Path
+
+          source = Path("index.html").read_text(encoding="utf-8")
+          match = re.search(r'DEMO_PDF_B64\\s*=\\s*"([A-Za-z0-9+/=]+)"', source)
+          assert match, "Embedded demo PDF base64 payload is missing"
+          pdf = base64.b64decode(match.group(1), validate=True)
+          assert pdf.startswith(b"%PDF-"), "Demo sample is not a PDF"
+          assert b"%%EOF" in pdf[-1024:], "Demo PDF is missing its EOF marker"
+          assert len(pdf) > 300, "Demo PDF payload is unexpectedly small"
+          print(f"Embedded demo PDF looks structurally valid ({len(pdf)} bytes).")
+          PY
