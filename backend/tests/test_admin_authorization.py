@@ -195,6 +195,64 @@ class AdminAuthorizationTests(unittest.TestCase):
         self.assertEqual(response.status_code, 403)
         self.assertEqual(response.json()["detail"], "This account is inactive.")
 
+    def test_two_channel_otp_is_required_and_each_code_is_single_use(self):
+        email = "master-a@example.test"
+        batch_id = "otp-single-use-test-0001"
+        expires_at = datetime.now(timezone.utc) + timedelta(minutes=5)
+        with self.SessionLocal() as db:
+            db.add_all([
+                OTPChallenge(
+                    user_id=self.master_id,
+                    batch_id=batch_id,
+                    channel="email",
+                    code_hash=otp_digest("112233"),
+                    expires_at=expires_at,
+                ),
+                OTPChallenge(
+                    user_id=self.master_id,
+                    batch_id=batch_id,
+                    channel="phone",
+                    code_hash=otp_digest("445566"),
+                    expires_at=expires_at,
+                ),
+            ])
+            db.commit()
+
+        email_response = self.client.post(
+            "/auth/verify-otp",
+            json={"email": email, "channel": "email", "code": "112233"},
+        )
+        self.assertEqual(email_response.status_code, 200)
+        email_result = email_response.json()
+        self.assertTrue(email_result["verified"])
+        self.assertFalse(email_result["both_channels_verified"])
+        self.assertEqual(email_result["next_channel"], "phone")
+        self.assertNotIn("access_token", email_result)
+
+        phone_response = self.client.post(
+            "/auth/verify-otp",
+            json={"email": email, "channel": "phone", "code": "445566"},
+        )
+        self.assertEqual(phone_response.status_code, 200)
+        phone_result = phone_response.json()
+        self.assertTrue(phone_result["both_channels_verified"])
+        self.assertEqual(phone_result["token_type"], "bearer")
+        token = phone_result["access_token"]
+        self.assertTrue(token)
+        authorized = self.client.get(
+            "/admin/users",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        self.assertEqual(authorized.status_code, 200)
+
+        for channel, code in (("email", "112233"), ("phone", "445566")):
+            replay = self.client.post(
+                "/auth/verify-otp",
+                json={"email": email, "channel": channel, "code": code},
+            )
+            self.assertEqual(replay.status_code, 400)
+            self.assertEqual(replay.json()["detail"], "Request a new OTP first.")
+
 
 if __name__ == "__main__":
     unittest.main()
