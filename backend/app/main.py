@@ -1,4 +1,4 @@
-import hashlib, json, secrets, io
+import hashlib, json, secrets, io, hmac, re
 from pathlib import Path
 from datetime import datetime, timezone
 from decimal import Decimal
@@ -13,6 +13,7 @@ from .models import *
 from .schemas import *
 from .security import verify_password, create_token, hash_password, current_user, require_roles
 from .config import settings
+from .auth_delivery import send_email_otp, send_sms_otp
 
 app = FastAPI(title="Shivashirwad Digital Valuation System API", version="0.2.0")
 app.add_middleware(CORSMiddleware, allow_origins=["http://localhost:5173"], allow_credentials=True,
@@ -28,8 +29,13 @@ def startup():
             if not inst:
                 inst = Institution(name="Demo University", code="DEMO")
                 db.add(inst); db.flush()
-                db.add(User(institution_id=inst.id, username=settings.bootstrap_username,
-                            password_hash=hash_password(settings.bootstrap_password), role=Role.SUPER_ADMIN))
+                master = User(institution_id=inst.id, username=settings.bootstrap_username,
+                            password_hash=hash_password(settings.bootstrap_password), role=Role.SUPER_ADMIN)
+                db.add(master); db.flush()
+                if settings.bootstrap_email and settings.bootstrap_phone:
+                    db.add(UserProfile(user_id=master.id, full_name=settings.bootstrap_name,
+                                       email=settings.bootstrap_email.strip().lower(),
+                                       phone=settings.bootstrap_phone.strip()))
                 db.commit()
 
 def audit(db, user, action, entity_type, entity_id, detail=None):
@@ -223,3 +229,94 @@ def submit(evaluation_id: str, db: Session = Depends(get_db), user: User = Depen
     ev.submitted_at = datetime.now(timezone.utc); script.status = "SUBMITTED"
     audit(db, user, "EVALUATION_SUBMITTED", "evaluation", ev.id, {"sha256": digest, "total": str(total)}); db.commit()
     return {"id": ev.id, "status": ev.status.value, "total_marks": str(total), "content_sha256": digest}
+
+def otp_digest(code:str)->str:
+    secret=(settings.otp_secret or settings.jwt_secret).encode()
+    return hmac.new(secret,code.encode(),hashlib.sha256).hexdigest()
+
+@app.post("/auth/request-otp")
+def request_otp(body: OTPRequestIn, db: Session = Depends(get_db)):
+    email=body.email.strip().lower()
+    profile=db.scalar(select(UserProfile).where(UserProfile.email==email))
+    if not profile: raise HTTPException(404,"This email is not registered. Contact the SDVS master administrator.")
+    user=db.get(User,profile.user_id)
+    if not user or not user.active: raise HTTPException(403,"This account is inactive.")
+    recent=db.scalar(select(func.count(OTPChallenge.id)).where(OTPChallenge.user_id==user.id,
+        OTPChallenge.created_at >= datetime.now(timezone.utc)-__import__('datetime').timedelta(seconds=60)))
+    if recent and recent>=2: raise HTTPException(429,"Please wait 60 seconds before requesting another OTP.")
+    email_code=f"{secrets.randbelow(1000000):06d}"
+    phone_code=f"{secrets.randbelow(1000000):06d}"
+    expiry=datetime.now(timezone.utc)+__import__('datetime').timedelta(minutes=settings.otp_ttl_minutes)
+    db.add_all([OTPChallenge(user_id=user.id,channel="email",code_hash=otp_digest(email_code),expires_at=expiry),
+                OTPChallenge(user_id=user.id,channel="phone",code_hash=otp_digest(phone_code),expires_at=expiry)])
+    db.commit()
+    send_email_otp(profile.email,email_code)
+    send_sms_otp(profile.phone,phone_code)
+    return {"message":"Verification codes sent to your registered email and mobile number.",
+            "email_masked":profile.email[:2]+"***"+profile.email[profile.email.index("@"):],
+            "phone_masked":"******"+profile.phone[-4:],"expires_in_minutes":settings.otp_ttl_minutes}
+
+@app.post("/auth/verify-otp")
+def verify_otp(body: OTPVerifyIn, db: Session = Depends(get_db)):
+    email=body.email.strip().lower(); channel=body.channel.strip().lower()
+    if channel not in ("email","phone"): raise HTTPException(422,"Channel must be email or phone.")
+    profile=db.scalar(select(UserProfile).where(UserProfile.email==email))
+    if not profile: raise HTTPException(404,"Account not found.")
+    user=db.get(User,profile.user_id)
+    challenge=db.scalar(select(OTPChallenge).where(OTPChallenge.user_id==user.id,
+        OTPChallenge.channel==channel,OTPChallenge.consumed==False).order_by(OTPChallenge.created_at.desc()))
+    if not challenge: raise HTTPException(400,"Request a new OTP first.")
+    now=datetime.now(timezone.utc); expiry=challenge.expires_at
+    if expiry.tzinfo is None: expiry=expiry.replace(tzinfo=timezone.utc)
+    if expiry < now: raise HTTPException(400,"OTP expired. Request a new one.")
+    if challenge.attempts>=5: raise HTTPException(429,"Too many incorrect attempts. Request a new OTP.")
+    challenge.attempts+=1
+    if not hmac.compare_digest(challenge.code_hash,otp_digest(body.code)):
+        db.commit(); raise HTTPException(400,"Incorrect OTP.")
+    challenge.consumed=True
+    if channel=="email": profile.email_verified=True
+    else: profile.phone_verified=True
+    db.commit()
+    if profile.email_verified and profile.phone_verified:
+        return {"verified":True,"access_token":create_token(user),"token_type":"bearer",
+                "user":{"id":user.id,"name":profile.full_name,"email":profile.email,"phone":profile.phone,"role":user.role.value}}
+    return {"verified":True,"both_channels_verified":False,"next_channel":"phone" if channel=="email" else "email"}
+
+@app.get("/admin/users")
+def admin_users(db:Session=Depends(get_db),user:User=Depends(require_roles("SUPER_ADMIN"))):
+    rows=db.scalars(select(User).where(User.institution_id==user.institution_id)).all()
+    result=[]
+    for item in rows:
+        profile=db.scalar(select(UserProfile).where(UserProfile.user_id==item.id))
+        result.append({"id":item.id,"name":profile.full_name if profile else item.username,
+          "email":profile.email if profile else None,"phone":profile.phone if profile else None,
+          "email_verified":profile.email_verified if profile else False,
+          "phone_verified":profile.phone_verified if profile else False,"role":item.role.value,"active":item.active})
+    return result
+
+@app.post("/admin/users")
+def admin_create_user(body:AdminUserCreateIn,db:Session=Depends(get_db),user:User=Depends(require_roles("SUPER_ADMIN"))):
+    name=body.full_name.strip();email=body.email.strip().lower();phone=body.phone.strip()
+    if not re.fullmatch(r"[^@\\s]+@[^@\\s]+\\.[^@\\s]+",email): raise HTTPException(422,"Enter a valid email address.")
+    if not re.fullmatch(r"\\+[1-9]\\d{7,14}",phone): raise HTTPException(422,"Phone must use international format, e.g. +919876543210.")
+    try: role=Role(body.role)
+    except ValueError: raise HTTPException(422,"Invalid role.")
+    if role==Role.SUPER_ADMIN and user.role!=Role.SUPER_ADMIN: raise HTTPException(403,"Only master admin can create administrators.")
+    if db.scalar(select(UserProfile).where((UserProfile.email==email)|(UserProfile.phone==phone))):
+        raise HTTPException(409,"Email or mobile number is already registered.")
+    temporary=secrets.token_urlsafe(32)
+    account=User(institution_id=user.institution_id,username=email,password_hash=hash_password(temporary),role=role)
+    db.add(account);db.flush()
+    db.add(UserProfile(user_id=account.id,full_name=name,email=email,phone=phone))
+    audit(db,user,"USER_CREATED","user",account.id,{"email":email,"role":role.value})
+    db.commit()
+    return {"id":account.id,"name":name,"email":email,"phone":phone,"role":role.value,"message":"Account created. User must verify both email and mobile OTP to sign in."}
+
+@app.patch("/admin/users/{user_id}/active")
+def admin_set_user_active(user_id:str,active:bool,db:Session=Depends(get_db),user:User=Depends(require_roles("SUPER_ADMIN"))):
+    target=db.get(User,user_id)
+    if not target or target.institution_id!=user.institution_id: raise HTTPException(404,"User not found.")
+    if target.id==user.id and not active: raise HTTPException(400,"Master admin cannot deactivate their own account.")
+    target.active=active;audit(db,user,"USER_ACTIVATED" if active else "USER_DEACTIVATED","user",target.id);db.commit()
+    return {"id":target.id,"active":target.active}
+
