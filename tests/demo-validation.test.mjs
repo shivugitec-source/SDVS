@@ -6,6 +6,7 @@ import vm from "node:vm";
 const html = await readFile(new URL("../docs/index.html", import.meta.url), "utf8");
 const pagesWorkflow = await readFile(new URL("../.github/workflows/pages.yml", import.meta.url), "utf8");
 const adminHtml = await readFile(new URL("../docs/admin.html", import.meta.url), "utf8");
+const backendMain = await readFile(new URL("../backend/app/main.py", import.meta.url), "utf8");
 const validator = html.match(/function hasInvalidMarks\(list\)\s*\{[^\n]*\}/);
 assert.ok(validator, "Question mark validation helper is missing.");
 
@@ -212,13 +213,29 @@ test("Pages deployment waits for the fresh artifact to become API-visible", () =
 });
 
 
-test("admin portal keeps master-admin gating and safe session handling", () => {
-  assert.match(adminHtml, /if\\(d\\.user\\?\\.role!=='SUPER_ADMIN'\\)/);
-  assert.match(adminHtml, /function esc\\(s\\)/);
+test("admin API URL normalization removes a trailing slash", () => {
+  const start = adminHtml.indexOf("function url(path){");
+  const end = adminHtml.indexOf("\\n", start);
+  const helper = adminHtml.slice(start, end);
+  assert.ok(helper.includes("replace(/\\\\/$/,'')"), "API URL helper must remove a trailing slash.");
+  assert.equal(adminHtml.split("replace(/\\\\/$/,'')").length - 1, 3, "All API URL inputs must use the same normalization.");
+  const sandbox = {};
+  vm.runInNewContext(`let api = "https://api.example.test/"; ${helper}; globalThis.buildUrl = url;`, sandbox);
+  assert.equal(sandbox.buildUrl("/health"), "https://api.example.test/health");
+});
+
+test("admin portal preserves master-admin gating, server authorization, and safe session handling", () => {
+  assert.ok(adminHtml.includes("if(d.user?.role!=='SUPER_ADMIN')"), "OTP sign-in must reject non-master-admin roles.");
+  assert.ok(adminHtml.includes("async function resumeSession(){try{const users=await call('/admin/users');"), "A saved session must be re-authorized by the backend before showing admin controls.");
+  assert.ok(adminHtml.includes("if(token)resumeSession();"), "Saved tokens must pass through the authorization check.");
+  assert.ok(adminHtml.includes("function esc(s)"));
   assert.ok(adminHtml.includes("esc(u.name)"));
   assert.ok(adminHtml.includes("esc(u.role)"));
   assert.ok(adminHtml.includes("esc(u.email||'—')"));
   assert.ok(adminHtml.includes("esc(u.phone||'—')"));
   assert.ok(adminHtml.includes("sessionStorage.setItem('sdvs_token',token)"));
   assert.ok(!adminHtml.includes("localStorage.setItem('sdvs_token'"));
+  assert.ok(backendMain.includes('def admin_users(db:Session=Depends(get_db),user:User=Depends(require_roles("SUPER_ADMIN"))):'));
+  assert.ok(backendMain.includes('def admin_create_user(body:AdminUserCreateIn,db:Session=Depends(get_db),user:User=Depends(require_roles("SUPER_ADMIN"))):'));
+  assert.ok(backendMain.includes('def admin_set_user_active(user_id:str,active:bool,db:Session=Depends(get_db),user:User=Depends(require_roles("SUPER_ADMIN"))):'));
 });
