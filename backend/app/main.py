@@ -4,7 +4,7 @@ from datetime import datetime, timezone
 from decimal import Decimal
 from fastapi import FastAPI, Depends, HTTPException, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 from sqlalchemy import select, func
 from pypdf import PdfReader, PdfWriter
@@ -14,6 +14,7 @@ from .schemas import *
 from .security import verify_password, create_token, hash_password, current_user, require_roles
 from .config import settings
 from .auth_delivery import send_email_otp, send_sms_otp
+from .storage import put_object, get_object, check_storage, r2_enabled
 
 app = FastAPI(title="Shivashirwad Digital Valuation System API", version="0.2.0")
 app.add_middleware(CORSMiddleware, allow_origins=["http://localhost:5173"], allow_origin_regex=r"https://shivugitec-source\.github\.io", allow_credentials=False,
@@ -21,8 +22,12 @@ app.add_middleware(CORSMiddleware, allow_origins=["http://localhost:5173"], allo
 
 @app.on_event("startup")
 def startup():
+    if len(settings.jwt_secret) < 32 or settings.jwt_secret == "INSECURE-DEV-ONLY-CHANGE-ME":
+        raise RuntimeError("JWT_SECRET must be a private random value of at least 32 characters.")
+    if len(settings.otp_secret) < 32:
+        raise RuntimeError("OTP_SECRET must be a private random value of at least 32 characters.")
+    check_storage()
     Base.metadata.create_all(bind=engine)
-    Path(settings.storage_dir).mkdir(parents=True, exist_ok=True)
     if settings.dev_bootstrap:
         with SessionLocal() as db:
             inst = db.scalar(select(Institution).where(Institution.code == "DEMO"))
@@ -52,7 +57,14 @@ def audit(db, user, action, entity_type, entity_id, detail=None):
                       detail=json.dumps(detail or {}, sort_keys=True)))
 
 @app.get("/health")
-def health(): return {"status": "ok", "service": "sdvs-api"}
+def health():
+    try:
+        with engine.connect() as connection:
+            connection.execute(__import__("sqlalchemy").text("SELECT 1"))
+        storage = check_storage()
+        return {"status": "ok", "service": "sdvs-api", "database": "ok", "storage": storage}
+    except Exception:
+        raise HTTPException(503, "Service dependency check failed.")
 
 @app.post("/auth/login", response_model=TokenOut)
 def login(body: LoginIn, db: Session = Depends(get_db)):
@@ -135,7 +147,10 @@ async def upload_script(subject_id: str = Form(...), candidate_name: str = Form(
     code = "SDVS-" + secrets.token_hex(6).upper()
     digest = hashlib.sha256(clean).hexdigest()
     key = code + ".pdf"
-    Path(settings.storage_dir, key).write_bytes(clean)
+    try:
+        put_object(key, clean)
+    except Exception as exc:
+        raise HTTPException(503, "Private PDF storage is unavailable. Check R2 configuration.") from exc
     candidate = Candidate(institution_id=user.institution_id, register_number=register_number, full_name=candidate_name)
     db.add(candidate); db.flush()
     script = EvaluationScript(institution_id=user.institution_id, subject_id=subject.id, anonymous_code=code,
@@ -182,10 +197,16 @@ def assigned_questions(script_id: str, db: Session = Depends(get_db), user: User
 
 @app.get("/evaluator/scripts/{script_id}/pdf")
 def assigned_pdf(script_id: str, db: Session = Depends(get_db), user: User = Depends(require_roles("EVALUATOR"))):
-    script = assigned_script(script_id, user, db); path = Path(settings.storage_dir, script.object_key)
-    if not path.is_file(): raise HTTPException(404, "PDF not found")
-    return FileResponse(path, media_type="application/pdf", filename="anonymous-answer-script.pdf",
-                        headers={"Cache-Control": "no-store, private", "X-Content-Type-Options": "nosniff"})
+    script = assigned_script(script_id, user, db)
+    try:
+        content = get_object(script.object_key)
+    except FileNotFoundError:
+        raise HTTPException(404, "PDF not found")
+    except Exception as exc:
+        raise HTTPException(503, "Private PDF storage is unavailable.") from exc
+    return StreamingResponse(io.BytesIO(content), media_type="application/pdf",
+        headers={"Content-Disposition": 'inline; filename="anonymous-answer-script.pdf"',
+                 "Cache-Control": "no-store, private", "X-Content-Type-Options": "nosniff"})
 
 @app.get("/evaluator/scripts/{script_id}/evaluation")
 def get_evaluation(script_id: str, db: Session = Depends(get_db), user: User = Depends(require_roles("EVALUATOR"))):
