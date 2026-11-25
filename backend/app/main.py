@@ -1,4 +1,4 @@
-import hashlib, json, secrets
+import hashlib, json, secrets, io
 from pathlib import Path
 from datetime import datetime, timezone
 from decimal import Decimal
@@ -13,127 +13,213 @@ from .models import *
 from .schemas import *
 from .security import verify_password, create_token, hash_password, current_user, require_roles
 from .config import settings
-app=FastAPI(title="Shivashirwad Digital Valuation System API",version="0.2.0")
-app.add_middleware(CORSMiddleware,allow_origins=["http://localhost:5173"],allow_credentials=True,allow_methods=["GET","POST"],allow_headers=["Authorization","Content-Type"])
+
+app = FastAPI(title="Shivashirwad Digital Valuation System API", version="0.2.0")
+app.add_middleware(CORSMiddleware, allow_origins=["http://localhost:5173"], allow_credentials=True,
+                   allow_methods=["GET", "POST"], allow_headers=["Authorization", "Content-Type"])
+
 @app.on_event("startup")
 def startup():
- Base.metadata.create_all(bind=engine); Path(settings.storage_dir).mkdir(parents=True,exist_ok=True)
- if settings.dev_bootstrap:
-  with SessionLocal() as db:
-   inst=db.scalar(select(Institution).where(Institution.code=="DEMO"))
-   if not inst:
-    inst=Institution(name="Demo University",code="DEMO");db.add(inst);db.flush();db.add(User(institution_id=inst.id,username=settings.bootstrap_username,password_hash=hash_password(settings.bootstrap_password),role=Role.SUPER_ADMIN));db.commit()
-def audit(db,user,action,entity_type,entity_id,detail=None): db.add(AuditEvent(institution_id=user.institution_id,actor_id=user.id,action=action,entity_type=entity_type,entity_id=entity_id,detail=json.dumps(detail or {},sort_keys=True)))
+    Base.metadata.create_all(bind=engine)
+    Path(settings.storage_dir).mkdir(parents=True, exist_ok=True)
+    if settings.dev_bootstrap:
+        with SessionLocal() as db:
+            inst = db.scalar(select(Institution).where(Institution.code == "DEMO"))
+            if not inst:
+                inst = Institution(name="Demo University", code="DEMO")
+                db.add(inst); db.flush()
+                db.add(User(institution_id=inst.id, username=settings.bootstrap_username,
+                            password_hash=hash_password(settings.bootstrap_password), role=Role.SUPER_ADMIN))
+                db.commit()
+
+def audit(db, user, action, entity_type, entity_id, detail=None):
+    db.add(AuditEvent(institution_id=user.institution_id, actor_id=user.id, action=action,
+                      entity_type=entity_type, entity_id=entity_id,
+                      detail=json.dumps(detail or {}, sort_keys=True)))
+
 @app.get("/health")
-def health(): return {"status":"ok","service":"sdvs-api"}
-@app.post("/auth/login",response_model=TokenOut)
-def login(body:LoginIn,db:Session=Depends(get_db)):
- user=db.scalar(select(User).where(User.username==body.username,User.active==True))
- if not user or not verify_password(body.password,user.password_hash): raise HTTPException(401,"Incorrect username or password")
- return {"access_token":create_token(user)}
+def health(): return {"status": "ok", "service": "sdvs-api"}
+
+@app.post("/auth/login", response_model=TokenOut)
+def login(body: LoginIn, db: Session = Depends(get_db)):
+    user = db.scalar(select(User).where(User.username == body.username, User.active == True))
+    if not user or not verify_password(body.password, user.password_hash):
+        raise HTTPException(401, "Incorrect username or password")
+    return {"access_token": create_token(user)}
+
 @app.get("/admin/dashboard")
-def admin_dashboard(db:Session=Depends(get_db),user:User=Depends(require_roles("SUPER_ADMIN","EXAM_CONTROLLER"))):
- scripts=db.scalars(select(EvaluationScript).where(EvaluationScript.institution_id==user.institution_id)).all();ids=[s.id for s in scripts]
- evaluated=db.scalar(select(func.count(Evaluation.id)).where(Evaluation.script_id.in_(ids),Evaluation.status==Status.SUBMITTED)) if ids else 0
- active=db.scalar(select(func.count(User.id)).where(User.institution_id==user.institution_id,User.role==Role.EVALUATOR,User.active==True)) or 0
- return {"total_scripts":len(scripts),"evaluated":evaluated or 0,"pending":max(0,len(scripts)-(evaluated or 0)),"active_evaluators":active}
+def admin_dashboard(db: Session = Depends(get_db), user: User = Depends(require_roles("SUPER_ADMIN", "EXAM_CONTROLLER"))):
+    scripts = db.scalars(select(EvaluationScript).where(EvaluationScript.institution_id == user.institution_id)).all()
+    ids = [s.id for s in scripts]
+    evaluated = db.scalar(select(func.count(Evaluation.id)).where(Evaluation.script_id.in_(ids),
+                       Evaluation.status == Status.SUBMITTED)) if ids else 0
+    active = db.scalar(select(func.count(User.id)).where(User.institution_id == user.institution_id,
+                      User.role == Role.EVALUATOR, User.active == True)) or 0
+    return {"total_scripts": len(scripts), "evaluated": evaluated or 0,
+            "pending": max(0, len(scripts) - (evaluated or 0)), "active_evaluators": active}
+
 @app.post("/examinations")
-def create_exam(body:ExamIn,db:Session=Depends(get_db),user:User=Depends(require_roles("SUPER_ADMIN","EXAM_CONTROLLER"))):
- o=Examination(institution_id=user.institution_id,name=body.name,academic_year=body.academic_year);db.add(o);db.flush();audit(db,user,"EXAM_CREATED","examination",o.id);db.commit();return {"id":o.id,"name":o.name}
+def create_exam(body: ExamIn, db: Session = Depends(get_db), user: User = Depends(require_roles("SUPER_ADMIN", "EXAM_CONTROLLER"))):
+    obj = Examination(institution_id=user.institution_id, name=body.name, academic_year=body.academic_year)
+    db.add(obj); db.flush(); audit(db, user, "EXAM_CREATED", "examination", obj.id); db.commit()
+    return {"id": obj.id, "name": obj.name}
+
 @app.post("/examinations/{exam_id}/subjects")
-def create_subject(exam_id:str,body:SubjectIn,db:Session=Depends(get_db),user:User=Depends(require_roles("SUPER_ADMIN","EXAM_CONTROLLER"))):
- exam=db.get(Examination,exam_id)
- if not exam or exam.institution_id!=user.institution_id: raise HTTPException(404,"Examination not found")
- o=Subject(examination_id=exam.id,code=body.code,name=body.name,max_marks=body.max_marks);db.add(o);db.flush();audit(db,user,"SUBJECT_CREATED","subject",o.id);db.commit();return {"id":o.id,"name":o.name}
+def create_subject(exam_id: str, body: SubjectIn, db: Session = Depends(get_db), user: User = Depends(require_roles("SUPER_ADMIN", "EXAM_CONTROLLER"))):
+    exam = db.get(Examination, exam_id)
+    if not exam or exam.institution_id != user.institution_id: raise HTTPException(404, "Examination not found")
+    obj = Subject(examination_id=exam.id, code=body.code, name=body.name, max_marks=body.max_marks)
+    db.add(obj); db.flush(); audit(db, user, "SUBJECT_CREATED", "subject", obj.id); db.commit()
+    return {"id": obj.id, "name": obj.name}
+
 @app.post("/subjects/{subject_id}/questions")
-def create_question(subject_id:str,body:QuestionIn,db:Session=Depends(get_db),user:User=Depends(require_roles("SUPER_ADMIN","EXAM_CONTROLLER","CHIEF_EXAMINER"))):
- s=db.get(Subject,subject_id)
- if not s or db.get(Examination,s.examination_id).institution_id!=user.institution_id: raise HTTPException(404,"Subject not found")
- q=Question(subject_id=s.id,question_number=body.question_number,max_marks=body.max_marks,rubric=body.rubric);db.add(q);db.flush();audit(db,user,"QUESTION_CREATED","question",q.id);db.commit();return {"id":q.id,"question_number":q.question_number,"max_marks":float(q.max_marks)}
+def create_question(subject_id: str, body: QuestionIn, db: Session = Depends(get_db),
+                    user: User = Depends(require_roles("SUPER_ADMIN", "EXAM_CONTROLLER", "CHIEF_EXAMINER"))):
+    subject = db.get(Subject, subject_id)
+    if not subject or db.get(Examination, subject.examination_id).institution_id != user.institution_id:
+        raise HTTPException(404, "Subject not found")
+    q = Question(subject_id=subject.id, question_number=body.question_number, max_marks=body.max_marks, rubric=body.rubric)
+    db.add(q); db.flush(); audit(db, user, "QUESTION_CREATED", "question", q.id); db.commit()
+    return {"id": q.id, "question_number": q.question_number, "max_marks": float(q.max_marks)}
+
 @app.get("/subjects/{subject_id}/questions")
-def list_questions(subject_id:str,db:Session=Depends(get_db),user:User=Depends(current_user)):
- s=db.get(Subject,subject_id)
- if not s or db.get(Examination,s.examination_id).institution_id!=user.institution_id: raise HTTPException(404,"Subject not found")
- return [{"id":q.id,"question_number":q.question_number,"max_marks":float(q.max_marks),"rubric":q.rubric} for q in db.scalars(select(Question).where(Question.subject_id==s.id)).all()]
+def list_questions(subject_id: str, db: Session = Depends(get_db), user: User = Depends(current_user)):
+    subject = db.get(Subject, subject_id)
+    if not subject or db.get(Examination, subject.examination_id).institution_id != user.institution_id:
+        raise HTTPException(404, "Subject not found")
+    return [{"id": q.id, "question_number": q.question_number, "max_marks": float(q.max_marks), "rubric": q.rubric}
+            for q in db.scalars(select(Question).where(Question.subject_id == subject.id)).all()]
+
 @app.post("/users/evaluators")
-def create_evaluator(username:str=Form(...),password:str=Form(...),db:Session=Depends(get_db),user:User=Depends(require_roles("SUPER_ADMIN","EXAM_CONTROLLER"))):
- if len(password)<12: raise HTTPException(422,"Temporary password must contain at least 12 characters")
- if db.scalar(select(User).where(User.institution_id==user.institution_id,User.username==username)): raise HTTPException(409,"Username already exists")
- o=User(institution_id=user.institution_id,username=username,password_hash=hash_password(password),role=Role.EVALUATOR);db.add(o);db.flush();audit(db,user,"EVALUATOR_CREATED","user",o.id);db.commit();return {"id":o.id,"username":o.username,"role":o.role.value}
+def create_evaluator(username: str = Form(...), password: str = Form(...), db: Session = Depends(get_db),
+                     user: User = Depends(require_roles("SUPER_ADMIN", "EXAM_CONTROLLER"))):
+    if len(password) < 12: raise HTTPException(422, "Temporary password must contain at least 12 characters")
+    if db.scalar(select(User).where(User.institution_id == user.institution_id, User.username == username)):
+        raise HTTPException(409, "Username already exists")
+    evaluator = User(institution_id=user.institution_id, username=username,
+                     password_hash=hash_password(password), role=Role.EVALUATOR)
+    db.add(evaluator); db.flush(); audit(db, user, "EVALUATOR_CREATED", "user", evaluator.id); db.commit()
+    return {"id": evaluator.id, "username": evaluator.username, "role": evaluator.role.value}
+
 @app.post("/scripts/upload")
-async def upload_script(subject_id:str=Form(...),candidate_name:str=Form(...),register_number:str=Form(...),file:UploadFile=File(...),db:Session=Depends(get_db),user:User=Depends(require_roles("SUPER_ADMIN","EXAM_CONTROLLER"))):
- subject=db.get(Subject,subject_id)
- if not subject or db.get(Examination,subject.examination_id).institution_id!=user.institution_id: raise HTTPException(404,"Subject not found")
- if not (file.filename or "").lower().endswith(".pdf") or file.content_type not in ("application/pdf","application/octet-stream"): raise HTTPException(415,"Only PDF answer scripts are accepted")
- raw=await file.read(settings.max_upload_mb*1024*1024+1)
- if len(raw)>settings.max_upload_mb*1024*1024: raise HTTPException(413,"PDF exceeds upload limit")
- import io
- try:
-  reader=PdfReader(io.BytesIO(raw),strict=True)
-  if reader.is_encrypted: raise HTTPException(422,"Encrypted PDFs are not accepted")
-  if not reader.pages: raise HTTPException(422,"PDF has no pages")
-  writer=PdfWriter()
-  for page in reader.pages: writer.add_page(page)
-  out=io.BytesIO();writer.write(out);clean=out.getvalue()
- except HTTPException: raise
- except Exception: raise HTTPException(422,"PDF is invalid or unreadable")
- code="SDVS-"+secrets.token_hex(6).upper();digest=hashlib.sha256(clean).hexdigest();key=code+".pdf";Path(settings.storage_dir,key).write_bytes(clean)
- candidate=Candidate(institution_id=user.institution_id,register_number=register_number,full_name=candidate_name);db.add(candidate);db.flush()
- script=EvaluationScript(institution_id=user.institution_id,subject_id=subject.id,anonymous_code=code,object_key=key,pdf_sha256=digest,page_count=len(reader.pages));db.add(script);db.flush();db.add(IdentityMapping(candidate_id=candidate.id,script_id=script.id));audit(db,user,"SCRIPT_UPLOADED","script",script.id,{"anonymous_code":code,"sha256":digest});db.commit()
- return {"script_id":script.id,"anonymous_code":code,"page_count":script.page_count,"sha256":digest}
+async def upload_script(subject_id: str = Form(...), candidate_name: str = Form(...),
+                        register_number: str = Form(...), file: UploadFile = File(...),
+                        db: Session = Depends(get_db), user: User = Depends(require_roles("SUPER_ADMIN", "EXAM_CONTROLLER"))):
+    subject = db.get(Subject, subject_id)
+    if not subject or db.get(Examination, subject.examination_id).institution_id != user.institution_id:
+        raise HTTPException(404, "Subject not found")
+    if not (file.filename or "").lower().endswith(".pdf") or file.content_type not in ("application/pdf", "application/octet-stream"):
+        raise HTTPException(415, "Only PDF answer scripts are accepted")
+    raw = await file.read(settings.max_upload_mb * 1024 * 1024 + 1)
+    if len(raw) > settings.max_upload_mb * 1024 * 1024: raise HTTPException(413, "PDF exceeds upload limit")
+    try:
+        reader = PdfReader(io.BytesIO(raw), strict=True)
+        if reader.is_encrypted: raise HTTPException(422, "Encrypted PDFs are not accepted")
+        if not reader.pages: raise HTTPException(422, "PDF has no pages")
+        writer = PdfWriter()
+        for page in reader.pages: writer.add_page(page)
+        out = io.BytesIO(); writer.write(out); clean = out.getvalue()
+    except HTTPException: raise
+    except Exception: raise HTTPException(422, "PDF is invalid or unreadable")
+    code = "SDVS-" + secrets.token_hex(6).upper()
+    digest = hashlib.sha256(clean).hexdigest()
+    key = code + ".pdf"
+    Path(settings.storage_dir, key).write_bytes(clean)
+    candidate = Candidate(institution_id=user.institution_id, register_number=register_number, full_name=candidate_name)
+    db.add(candidate); db.flush()
+    script = EvaluationScript(institution_id=user.institution_id, subject_id=subject.id, anonymous_code=code,
+                              object_key=key, pdf_sha256=digest, page_count=len(reader.pages))
+    db.add(script); db.flush(); db.add(IdentityMapping(candidate_id=candidate.id, script_id=script.id))
+    audit(db, user, "SCRIPT_UPLOADED", "script", script.id, {"anonymous_code": code, "sha256": digest}); db.commit()
+    return {"script_id": script.id, "anonymous_code": code, "page_count": script.page_count, "sha256": digest}
+
 @app.post("/allocations")
-def allocate(body:AllocationIn,db:Session=Depends(get_db),user:User=Depends(require_roles("SUPER_ADMIN","EXAM_CONTROLLER"))):
- script=db.get(EvaluationScript,body.script_id);ev=db.get(User,body.evaluator_id)
- if not script or script.institution_id!=user.institution_id: raise HTTPException(404,"Script not found")
- if not ev or ev.institution_id!=user.institution_id or ev.role!=Role.EVALUATOR or not ev.active: raise HTTPException(400,"Evaluator must be active in this institution")
- o=Allocation(script_id=script.id,evaluator_id=ev.id);db.add(o);db.flush();audit(db,user,"SCRIPT_ALLOCATED","allocation",o.id);db.commit();return {"allocation_id":o.id}
+def allocate(body: AllocationIn, db: Session = Depends(get_db), user: User = Depends(require_roles("SUPER_ADMIN", "EXAM_CONTROLLER"))):
+    script = db.get(EvaluationScript, body.script_id); evaluator = db.get(User, body.evaluator_id)
+    if not script or script.institution_id != user.institution_id: raise HTTPException(404, "Script not found")
+    if not evaluator or evaluator.institution_id != user.institution_id or evaluator.role != Role.EVALUATOR or not evaluator.active:
+        raise HTTPException(400, "Evaluator must be active in this institution")
+    obj = Allocation(script_id=script.id, evaluator_id=evaluator.id)
+    db.add(obj); db.flush(); audit(db, user, "SCRIPT_ALLOCATED", "allocation", obj.id); db.commit()
+    return {"allocation_id": obj.id}
+
 @app.get("/evaluator/scripts")
-def my_scripts(db:Session=Depends(get_db),user:User=Depends(require_roles("EVALUATOR"))):
- rows=db.scalars(select(Allocation).where(Allocation.evaluator_id==user.id,Allocation.active==True)).all();result=[]
- for a in rows:
-  s=db.get(EvaluationScript,a.script_id)
-  if s and s.institution_id==user.institution_id:
-   sub=db.get(Subject,s.subject_id);result.append({"script_id":s.id,"anonymous_code":s.anonymous_code,"subject_id":s.subject_id,"subject_name":sub.name,"page_count":s.page_count,"status":s.status})
- return result
-def assigned_script(script_id,user,db):
- s=db.get(EvaluationScript,script_id)
- if not s or s.institution_id!=user.institution_id: raise HTTPException(404,"Script not found")
- a=db.scalar(select(Allocation).where(Allocation.script_id==s.id,Allocation.evaluator_id==user.id,Allocation.active==True))
- if not a: raise HTTPException(404,"Script not found")
- return s
+def my_scripts(db: Session = Depends(get_db), user: User = Depends(require_roles("EVALUATOR"))):
+    rows = db.scalars(select(Allocation).where(Allocation.evaluator_id == user.id, Allocation.active == True)).all()
+    result = []
+    for allocation in rows:
+        script = db.get(EvaluationScript, allocation.script_id)
+        if script and script.institution_id == user.institution_id:
+            subject = db.get(Subject, script.subject_id)
+            result.append({"script_id": script.id, "anonymous_code": script.anonymous_code, "subject_id": script.subject_id,
+                           "subject_name": subject.name, "page_count": script.page_count, "status": script.status})
+    return result
+
+def assigned_script(script_id, user, db):
+    script = db.get(EvaluationScript, script_id)
+    if not script or script.institution_id != user.institution_id: raise HTTPException(404, "Script not found")
+    allocation = db.scalar(select(Allocation).where(Allocation.script_id == script.id,
+                          Allocation.evaluator_id == user.id, Allocation.active == True))
+    if not allocation: raise HTTPException(404, "Script not found")
+    return script
+
 @app.get("/evaluator/scripts/{script_id}/questions")
-def assigned_questions(script_id:str,db:Session=Depends(get_db),user:User=Depends(require_roles("EVALUATOR"))):
- s=assigned_script(script_id,user,db);return [{"id":q.id,"question_number":q.question_number,"max_marks":float(q.max_marks),"rubric":q.rubric} for q in db.scalars(select(Question).where(Question.subject_id==s.subject_id)).all()]
+def assigned_questions(script_id: str, db: Session = Depends(get_db), user: User = Depends(require_roles("EVALUATOR"))):
+    script = assigned_script(script_id, user, db)
+    return [{"id": q.id, "question_number": q.question_number, "max_marks": float(q.max_marks), "rubric": q.rubric}
+            for q in db.scalars(select(Question).where(Question.subject_id == script.subject_id)).all()]
+
 @app.get("/evaluator/scripts/{script_id}/pdf")
-def assigned_pdf(script_id:str,db:Session=Depends(get_db),user:User=Depends(require_roles("EVALUATOR"))):
- s=assigned_script(script_id,user,db);path=Path(settings.storage_dir,s.object_key)
- if not path.is_file(): raise HTTPException(404,"PDF not found")
- return FileResponse(path,media_type="application/pdf",filename="anonymous-answer-script.pdf",headers={"Cache-Control":"no-store, private","X-Content-Type-Options":"nosniff"})
+def assigned_pdf(script_id: str, db: Session = Depends(get_db), user: User = Depends(require_roles("EVALUATOR"))):
+    script = assigned_script(script_id, user, db); path = Path(settings.storage_dir, script.object_key)
+    if not path.is_file(): raise HTTPException(404, "PDF not found")
+    return FileResponse(path, media_type="application/pdf", filename="anonymous-answer-script.pdf",
+                        headers={"Cache-Control": "no-store, private", "X-Content-Type-Options": "nosniff"})
+
 @app.get("/evaluator/scripts/{script_id}/evaluation")
-def get_evaluation(script_id:str,db:Session=Depends(get_db),user:User=Depends(require_roles("EVALUATOR"))):
- assigned_script(script_id,user,db);ev=db.scalar(select(Evaluation).where(Evaluation.script_id==script_id,Evaluation.evaluator_id==user.id))
- if not ev:return {"id":None,"status":"DRAFT","marks":[]}
- marks=db.scalars(select(QuestionMark).where(QuestionMark.evaluation_id==ev.id)).all()
- return {"id":ev.id,"status":ev.status.value,"total_marks":str(ev.total_marks) if ev.total_marks is not None else None,"marks":[{"question_id":m.question_id,"marks":str(m.marks),"remark":m.remark,"private_note":m.private_note} for m in marks]}
+def get_evaluation(script_id: str, db: Session = Depends(get_db), user: User = Depends(require_roles("EVALUATOR"))):
+    assigned_script(script_id, user, db)
+    ev = db.scalar(select(Evaluation).where(Evaluation.script_id == script_id, Evaluation.evaluator_id == user.id))
+    if not ev: return {"id": None, "status": "DRAFT", "marks": []}
+    marks = db.scalars(select(QuestionMark).where(QuestionMark.evaluation_id == ev.id)).all()
+    return {"id": ev.id, "status": ev.status.value, "total_marks": str(ev.total_marks) if ev.total_marks is not None else None,
+            "marks": [{"question_id": m.question_id, "marks": str(m.marks), "remark": m.remark, "private_note": m.private_note} for m in marks]}
+
 @app.post("/evaluations")
-def save_draft(body:EvaluationIn,db:Session=Depends(get_db),user:User=Depends(require_roles("EVALUATOR"))):
- script=assigned_script(body.script_id,user,db);ev=db.scalar(select(Evaluation).where(Evaluation.script_id==script.id,Evaluation.evaluator_id==user.id))
- if ev and ev.status!=Status.DRAFT:raise HTTPException(409,"Submitted evaluation is locked")
- if not ev:ev=Evaluation(script_id=script.id,evaluator_id=user.id,status=Status.DRAFT);db.add(ev);db.flush()
- qs=db.scalars(select(Question).where(Question.subject_id==script.subject_id)).all();qmap={q.id:q for q in qs};incoming={m.question_id:m for m in body.marks}
- if len(incoming)!=len(body.marks):raise HTTPException(422,"Duplicate question entries")
- for qid,m in incoming.items():
-  if qid not in qmap:raise HTTPException(422,"Question does not belong to this subject")
-  if Decimal(str(m.marks))>Decimal(str(qmap[qid].max_marks)):raise HTTPException(422,f"Marks exceed maximum for {qmap[qid].question_number}")
- for old in db.scalars(select(QuestionMark).where(QuestionMark.evaluation_id==ev.id)).all():db.delete(old)
- for qid,m in incoming.items():db.add(QuestionMark(evaluation_id=ev.id,question_id=qid,marks=m.marks,remark=m.remark,private_note=m.private_note))
- ev.total_marks=sum((Decimal(str(m.marks)) for m in incoming.values()),Decimal("0"));audit(db,user,"DRAFT_SAVED","evaluation",ev.id,{"question_count":len(incoming)});db.commit();return {"id":ev.id,"evaluation_id":ev.id,"status":ev.status.value,"draft_total":str(ev.total_marks)}
+def save_draft(body: EvaluationIn, db: Session = Depends(get_db), user: User = Depends(require_roles("EVALUATOR"))):
+    script = assigned_script(body.script_id, user, db)
+    ev = db.scalar(select(Evaluation).where(Evaluation.script_id == script.id, Evaluation.evaluator_id == user.id))
+    if ev and ev.status != Status.DRAFT: raise HTTPException(409, "Submitted evaluation is locked")
+    if not ev: ev = Evaluation(script_id=script.id, evaluator_id=user.id, status=Status.DRAFT); db.add(ev); db.flush()
+    questions = db.scalars(select(Question).where(Question.subject_id == script.subject_id)).all()
+    qmap = {q.id: q for q in questions}; incoming = {m.question_id: m for m in body.marks}
+    if len(incoming) != len(body.marks): raise HTTPException(422, "Duplicate question entries")
+    for qid, mark in incoming.items():
+        if qid not in qmap: raise HTTPException(422, "Question does not belong to this subject")
+        if Decimal(str(mark.marks)) > Decimal(str(qmap[qid].max_marks)):
+            raise HTTPException(422, f"Marks exceed maximum for {qmap[qid].question_number}")
+    for old in db.scalars(select(QuestionMark).where(QuestionMark.evaluation_id == ev.id)).all(): db.delete(old)
+    for qid, mark in incoming.items():
+        db.add(QuestionMark(evaluation_id=ev.id, question_id=qid, marks=mark.marks, remark=mark.remark, private_note=mark.private_note))
+    ev.total_marks = sum((Decimal(str(m.marks)) for m in incoming.values()), Decimal("0"))
+    audit(db, user, "DRAFT_SAVED", "evaluation", ev.id, {"question_count": len(incoming)}); db.commit()
+    return {"id": ev.id, "evaluation_id": ev.id, "status": ev.status.value, "draft_total": str(ev.total_marks)}
+
 @app.post("/evaluations/{evaluation_id}/submit")
-def submit(evaluation_id:str,db:Session=Depends(get_db),user:User=Depends(require_roles("EVALUATOR"))):
- ev=db.get(Evaluation,evaluation_id)
- if not ev or ev.evaluator_id!=user.id:raise HTTPException(404,"Evaluation not found")
- if ev.status!=Status.DRAFT:raise HTTPException(409,"Already submitted")
- script=db.get(EvaluationScript,ev.script_id);qs=db.scalars(select(Question).where(Question.subject_id==script.subject_id)).all();marks=db.scalars(select(QuestionMark).where(QuestionMark.evaluation_id==ev.id)).all();byq={m.question_id:m for m in marks};missing=[q.question_number for q in qs if q.id not in byq]
- if missing:raise HTTPException(422,{"message":"Evaluate every question before submission","missing":missing})
- total=sum((Decimal(str(byq[q.id].marks)) for q in qs),Decimal("0"));payload=[{"question_id":q.id,"marks":str(byq[q.id].marks),"remark":byq[q.id].remark,"private_note":byq[q.id].private_note} for q in qs]
- digest=hashlib.sha256(json.dumps({"script_id":script.id,"evaluator_id":user.id,"version":ev.version,"total":str(total),"marks":payload},sort_keys=True,separators=(",",":")).encode()).hexdigest();ev.total_marks=total;ev.content_hash=digest;ev.status=Status.SUBMITTED;ev.submitted_at=datetime.now(timezone.utc);script.status="SUBMITTED";audit(db,user,"EVALUATION_SUBMITTED","evaluation",ev.id,{"sha256":digest,"total":str(total)});db.commit();return {"id":ev.id,"status":ev.status.value,"total_marks":str(total),"content_sha256":digest}
+def submit(evaluation_id: str, db: Session = Depends(get_db), user: User = Depends(require_roles("EVALUATOR"))):
+    ev = db.get(Evaluation, evaluation_id)
+    if not ev or ev.evaluator_id != user.id: raise HTTPException(404, "Evaluation not found")
+    if ev.status != Status.DRAFT: raise HTTPException(409, "Already submitted")
+    script = db.get(EvaluationScript, ev.script_id)
+    questions = db.scalars(select(Question).where(Question.subject_id == script.subject_id)).all()
+    marks = db.scalars(select(QuestionMark).where(QuestionMark.evaluation_id == ev.id)).all(); byq = {m.question_id: m for m in marks}
+    missing = [q.question_number for q in questions if q.id not in byq]
+    if missing: raise HTTPException(422, {"message": "Evaluate every question before submission", "missing": missing})
+    total = sum((Decimal(str(byq[q.id].marks)) for q in questions), Decimal("0"))
+    payload = [{"question_id": q.id, "marks": str(byq[q.id].marks), "remark": byq[q.id].remark, "private_note": byq[q.id].private_note} for q in questions]
+    digest = hashlib.sha256(json.dumps({"script_id": script.id, "evaluator_id": user.id, "version": ev.version,
+                      "total": str(total), "marks": payload}, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+    ev.total_marks = total; ev.content_hash = digest; ev.status = Status.SUBMITTED
+    ev.submitted_at = datetime.now(timezone.utc); script.status = "SUBMITTED"
+    audit(db, user, "EVALUATION_SUBMITTED", "evaluation", ev.id, {"sha256": digest, "total": str(total)}); db.commit()
+    return {"id": ev.id, "status": ev.status.value, "total_marks": str(total), "content_sha256": digest}
