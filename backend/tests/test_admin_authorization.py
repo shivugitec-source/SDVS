@@ -474,7 +474,7 @@ class AdminAuthorizationTests(unittest.TestCase):
         get_otp_request_user_for_update(recorder, self.master_id)
         sql = str(recorder.statement.compile(dialect=postgresql.dialect()))
         self.assertIn("FOR UPDATE", sql.upper())
-        self.assertIn("FROM users", sql.lower())
+        self.assertIn("from users", sql.lower())
 
         with (
             patch(
