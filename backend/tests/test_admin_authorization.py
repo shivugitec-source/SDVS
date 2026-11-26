@@ -294,6 +294,40 @@ class AdminAuthorizationTests(unittest.TestCase):
             self.assertTrue(persisted.consumed)
             self.assertEqual(persisted.attempts, 1)
 
+    def test_stale_otp_request_cannot_exceed_attempt_limit(self):
+        batch_id = "otp-concurrent-limit-test-0001"
+        expires_at = datetime.now(timezone.utc) + timedelta(minutes=5)
+        with self.SessionLocal() as db:
+            challenge = OTPChallenge(
+                user_id=self.master_id,
+                batch_id=batch_id,
+                channel="email",
+                code_hash=otp_digest("123123"),
+                expires_at=expires_at,
+                attempts=4,
+            )
+            db.add(challenge)
+            db.commit()
+            challenge_id = challenge.id
+
+        # Model two requests that both read the fourth attempt before either
+        # writes. The conditional UPDATE must allow only one to claim attempt 5.
+        with self.SessionLocal() as db:
+            stale_challenge = db.get(OTPChallenge, challenge_id)
+            db.expunge(stale_challenge)
+
+        with self.SessionLocal() as db:
+            current_challenge = db.get(OTPChallenge, challenge_id)
+            self.assertTrue(claim_otp_attempt(db, current_challenge, consume=False))
+            db.commit()
+
+        with self.SessionLocal() as db:
+            self.assertFalse(claim_otp_attempt(db, stale_challenge, consume=False))
+            db.rollback()
+            persisted = db.get(OTPChallenge, challenge_id)
+            self.assertEqual(persisted.attempts, 5)
+            self.assertFalse(persisted.consumed)
+
     def test_expired_otp_is_rejected_even_when_the_code_matches(self):
         email = "master-a@example.test"
         batch_id = "otp-expired-test-0001"
