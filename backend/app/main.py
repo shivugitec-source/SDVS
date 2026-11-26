@@ -262,14 +262,22 @@ def otp_digest(code:str)->str:
     secret=(settings.otp_secret or settings.jwt_secret).encode()
     return hmac.new(secret,code.encode(),hashlib.sha256).hexdigest()
 
-def claim_otp_attempt(db: Session, challenge: OTPChallenge, *, consume: bool) -> bool:
-    """Atomically claim one OTP attempt so concurrent requests cannot reuse it."""
+def claim_otp_attempt(
+    db: Session,
+    challenge: OTPChallenge,
+    *,
+    consume: bool,
+    now: datetime | None = None,
+) -> bool:
+    """Atomically claim one unexpired OTP attempt so stale requests cannot reuse it."""
+    now = now or datetime.now(timezone.utc)
     result = db.execute(
         update(OTPChallenge)
         .where(
             OTPChallenge.id == challenge.id,
             OTPChallenge.consumed.is_(False),
             OTPChallenge.attempts < 5,
+            OTPChallenge.expires_at > now,
         )
         .values(
             attempts=OTPChallenge.attempts + 1,

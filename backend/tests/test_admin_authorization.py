@@ -426,6 +426,39 @@ class AdminAuthorizationTests(unittest.TestCase):
             self.assertFalse(challenge.consumed)
             self.assertEqual(challenge.attempts, 0)
 
+    def test_stale_otp_request_cannot_claim_a_challenge_after_expiry(self):
+        batch_id = "otp-expiry-claim-test-0001"
+        expires_at = datetime.now(timezone.utc) + timedelta(minutes=5)
+        with self.SessionLocal() as db:
+            challenge = OTPChallenge(
+                user_id=self.master_id,
+                batch_id=batch_id,
+                channel="email",
+                code_hash=otp_digest("456456"),
+                expires_at=expires_at,
+            )
+            db.add(challenge)
+            db.commit()
+            challenge_id = challenge.id
+
+        # The request read a live challenge, but its atomic claim happens
+        # after the expiry boundary. The database predicate must reject it.
+        with self.SessionLocal() as db:
+            stale_challenge = db.get(OTPChallenge, challenge_id)
+            db.expunge(stale_challenge)
+
+        with self.SessionLocal() as db:
+            claim_time = expires_at + timedelta(seconds=1)
+            self.assertFalse(
+                claim_otp_attempt(
+                    db, stale_challenge, consume=True, now=claim_time
+                )
+            )
+            db.rollback()
+            persisted = db.get(OTPChallenge, challenge_id)
+            self.assertFalse(persisted.consumed)
+            self.assertEqual(persisted.attempts, 0)
+
     def test_otp_is_locked_after_five_incorrect_attempts(self):
         email = "master-a@example.test"
         batch_id = "otp-attempt-limit-test-0001"
