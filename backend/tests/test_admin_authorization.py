@@ -726,6 +726,55 @@ class AdminAuthorizationTests(unittest.TestCase):
             self.assertEqual(script.status, "SUBMITTED")
 
 
+    def test_submitted_evaluation_rejects_draft_changes_and_preserves_hash(self):
+        fixture = self._create_evaluation_assignment()
+        headers = {"Authorization": f"Bearer {self.evaluator_token}"}
+
+        submitted = self.client.post(
+            f"/evaluations/{fixture['evaluation_id']}/submit",
+            headers=headers,
+        )
+        self.assertEqual(submitted.status_code, 200, submitted.text)
+        submitted_hash = submitted.json()["content_sha256"]
+
+        with self.SessionLocal() as db:
+            evaluation = db.get(Evaluation, fixture["evaluation_id"])
+            original_submitted_at = evaluation.submitted_at
+            original_total = evaluation.total_marks
+            original_mark = db.query(QuestionMark).filter_by(
+                evaluation_id=fixture["evaluation_id"]
+            ).one()
+            original_mark_id = original_mark.id
+            original_mark_value = original_mark.marks
+
+        attempted_change = self.client.post(
+            "/evaluations",
+            json={
+                "script_id": fixture["script_id"],
+                "marks": [
+                    {"question_id": fixture["question_id"], "marks": 1}
+                ],
+            },
+            headers=headers,
+        )
+        self.assertEqual(attempted_change.status_code, 409, attempted_change.text)
+        self.assertEqual(
+            attempted_change.json()["detail"],
+            "Submitted evaluation is locked",
+        )
+
+        with self.SessionLocal() as db:
+            evaluation = db.get(Evaluation, fixture["evaluation_id"])
+            persisted_mark = db.query(QuestionMark).filter_by(
+                evaluation_id=fixture["evaluation_id"]
+            ).one()
+            self.assertEqual(evaluation.status, Status.SUBMITTED)
+            self.assertEqual(evaluation.content_hash, submitted_hash)
+            self.assertEqual(evaluation.submitted_at, original_submitted_at)
+            self.assertEqual(evaluation.total_marks, original_total)
+            self.assertEqual(persisted_mark.id, original_mark_id)
+            self.assertEqual(persisted_mark.marks, original_mark_value)
+
     def test_draft_save_and_submission_lock_allocation_before_evaluation(self):
         fixture = self._create_evaluation_assignment()
         events = []
