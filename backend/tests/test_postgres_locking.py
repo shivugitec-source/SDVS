@@ -7,7 +7,7 @@ from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import sessionmaker
 
 from app.db import Base
-from app.main import assigned_pdf, assigned_questions, assigned_script, get_evaluation, get_evaluation_for_update, get_otp_request_user_for_update
+from app.main import assigned_pdf, assigned_questions, assigned_script, get_evaluation, get_evaluation_for_update, get_otp_request_user_for_update, my_scripts
 from app.models import Allocation, Evaluation, EvaluationScript, Examination, Institution, Question, QuestionMark, Role, Status, Subject, User
 
 
@@ -693,6 +693,113 @@ class PostgresOtpLockingTests(unittest.TestCase):
                     synchronize_session=False
                 )
                 db.query(Question).filter_by(id=question_id).delete(
+                    synchronize_session=False
+                )
+                db.query(Subject).filter_by(id=subject_id).delete(
+                    synchronize_session=False
+                )
+                db.query(Examination).filter_by(id=examination_id).delete(
+                    synchronize_session=False
+                )
+                db.query(User).filter_by(id=evaluator_id).delete(
+                    synchronize_session=False
+                )
+                db.query(Institution).filter_by(id=institution_id).delete(
+                    synchronize_session=False
+                )
+                db.commit()
+
+
+    def test_evaluator_script_list_holds_active_allocation_lock_until_response_prepared(self):
+        suffix = uuid.uuid4().hex
+        with self.SessionLocal() as db:
+            institution = Institution(
+                name="SDVS script-list allocation lock test",
+                code=f"LSLOCK-{suffix[:20]}",
+            )
+            db.add(institution)
+            db.flush()
+            evaluator = User(
+                institution_id=institution.id,
+                username=f"script-list-lock-{suffix}",
+                password_hash="not-a-real-password",
+                role=Role.EVALUATOR,
+            )
+            examination = Examination(
+                institution_id=institution.id,
+                name="Script-list allocation lock test",
+                academic_year="2026-27",
+            )
+            db.add_all([evaluator, examination])
+            db.flush()
+            subject = Subject(
+                examination_id=examination.id,
+                code=f"LS-{suffix[:8]}",
+                name="Script-list lock subject",
+                max_marks=10,
+            )
+            db.add(subject)
+            db.flush()
+            script = EvaluationScript(
+                institution_id=institution.id,
+                subject_id=subject.id,
+                anonymous_code=f"SDVS-LS-{suffix[:12]}",
+                object_key="unused-script-list-lock-test.pdf",
+                pdf_sha256="0" * 64,
+                page_count=1,
+            )
+            db.add(script)
+            db.flush()
+            allocation = Allocation(
+                script_id=script.id,
+                evaluator_id=evaluator.id,
+                active=True,
+            )
+            db.add(allocation)
+            db.commit()
+            institution_id = institution.id
+            evaluator_id = evaluator.id
+            examination_id = examination.id
+            subject_id = subject.id
+            script_id = script.id
+            allocation_id = allocation.id
+
+        try:
+            with self.SessionLocal() as first, self.SessionLocal() as second:
+                first.begin()
+                evaluator = first.get(User, evaluator_id)
+                response = my_scripts(first, evaluator)
+                self.assertEqual(
+                    [item["script_id"] for item in response],
+                    [script_id],
+                )
+
+                second.begin()
+                second.execute(text("SET LOCAL lock_timeout = '250ms'"))
+                with self.assertRaises(OperationalError):
+                    second.execute(
+                        text("UPDATE allocations SET active = false WHERE id = :id"),
+                        {"id": allocation_id},
+                    )
+                second.rollback()
+                first.commit()
+
+                second.begin()
+                second.execute(
+                    text("UPDATE allocations SET active = false WHERE id = :id"),
+                    {"id": allocation_id},
+                )
+                second.commit()
+
+            with self.SessionLocal() as db:
+                evaluator = db.get(User, evaluator_id)
+                self.assertEqual(my_scripts(db, evaluator), [])
+        finally:
+            with self.SessionLocal() as db:
+                db.query(Allocation).filter_by(id=allocation_id).delete(
+                    synchronize_session=False
+                )
+                db.query(EvaluationScript).filter_by(id=script_id).delete(
                     synchronize_session=False
                 )
                 db.query(Subject).filter_by(id=subject_id).delete(

@@ -173,7 +173,12 @@ def allocate(body: AllocationIn, db: Session = Depends(get_db), user: User = Dep
 
 @app.get("/evaluator/scripts")
 def my_scripts(db: Session = Depends(get_db), user: User = Depends(require_roles("EVALUATOR"))):
-    rows = db.scalars(select(Allocation).where(Allocation.evaluator_id == user.id, Allocation.active == True)).all()
+    # Serialize active-script listing with concurrent allocation revocation.
+    rows = db.scalars(
+        select(Allocation)
+        .where(Allocation.evaluator_id == user.id, Allocation.active == True)
+        .with_for_update()
+    ).all()
     result = []
     for allocation in rows:
         script = db.get(EvaluationScript, allocation.script_id)
