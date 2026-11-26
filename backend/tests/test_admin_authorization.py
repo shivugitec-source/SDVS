@@ -461,5 +461,36 @@ class AdminAuthorizationTests(unittest.TestCase):
             self.assertFalse(challenge.consumed)
 
 
+    def test_otp_requests_are_rate_limited_after_two_batches_per_minute(self):
+        email = "master-a@example.test"
+        with (
+            patch("app.main.send_email_otp") as email_delivery,
+            patch("app.main.send_sms_otp") as sms_delivery,
+        ):
+            first = self.client.post("/auth/request-otp", json={"email": email})
+            second = self.client.post("/auth/request-otp", json={"email": email})
+            third = self.client.post("/auth/request-otp", json={"email": email})
+
+        self.assertEqual(first.status_code, 200)
+        self.assertEqual(second.status_code, 200)
+        self.assertEqual(third.status_code, 429)
+        self.assertEqual(
+            third.json()["detail"],
+            "Please wait 60 seconds before requesting another OTP.",
+        )
+        self.assertEqual(email_delivery.call_count, 2)
+        self.assertEqual(sms_delivery.call_count, 2)
+
+        with self.SessionLocal() as db:
+            challenges = db.query(OTPChallenge).filter_by(
+                user_id=self.master_id
+            ).all()
+            self.assertEqual(len(challenges), 4)
+            self.assertEqual(sum(challenge.consumed for challenge in challenges), 2)
+            active = [challenge for challenge in challenges if not challenge.consumed]
+            self.assertEqual({challenge.channel for challenge in active}, {"email", "phone"})
+            self.assertEqual(len({challenge.batch_id for challenge in active}), 1)
+
+
 if __name__ == "__main__":
     unittest.main()
