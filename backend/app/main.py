@@ -234,6 +234,9 @@ def assigned_pdf(script_id: str, db: Session = Depends(get_db), user: User = Dep
         raise HTTPException(404, "PDF not found")
     except Exception as exc:
         raise HTTPException(503, "Private PDF storage is unavailable.") from exc
+    actual_digest = hashlib.sha256(content).hexdigest()
+    if not hmac.compare_digest(actual_digest, script.pdf_sha256):
+        raise HTTPException(503, "Stored PDF integrity check failed.")
     return StreamingResponse(io.BytesIO(content), media_type="application/pdf",
         headers={"Content-Disposition": 'inline; filename="anonymous-answer-script.pdf"',
                  "Cache-Control": "no-store, private", "X-Content-Type-Options": "nosniff"})

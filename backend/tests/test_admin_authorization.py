@@ -726,6 +726,51 @@ class AdminAuthorizationTests(unittest.TestCase):
             self.assertEqual(script.status, "SUBMITTED")
 
 
+    def test_assigned_pdf_is_served_when_stored_sha256_matches(self):
+        import hashlib
+
+        fixture = self._create_evaluation_assignment()
+        pdf_bytes = b"%PDF-1.4\\n% SDVS integrity fixture\\n%%EOF\\n"
+        expected_digest = hashlib.sha256(pdf_bytes).hexdigest()
+        with self.SessionLocal() as db:
+            script = db.get(EvaluationScript, fixture["script_id"])
+            script.pdf_sha256 = expected_digest
+            db.commit()
+
+        with patch("app.main.get_object", return_value=pdf_bytes) as get_object:
+            response = self.client.get(
+                f"/evaluator/scripts/{fixture['script_id']}/pdf",
+                headers={"Authorization": f"Bearer {self.evaluator_token}"},
+            )
+
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.content, pdf_bytes)
+        self.assertEqual(response.headers["content-type"], "application/pdf")
+        self.assertEqual(response.headers["cache-control"], "no-store, private")
+        get_object.assert_called_once_with("unused-test-object.pdf")
+
+    def test_assigned_pdf_is_rejected_when_stored_sha256_does_not_match(self):
+        import hashlib
+
+        fixture = self._create_evaluation_assignment()
+        original_pdf = b"%PDF-1.4\\n% original stored object\\n%%EOF\\n"
+        tampered_pdf = b"%PDF-1.4\\n% substituted object\\n%%EOF\\n"
+        expected_digest = hashlib.sha256(original_pdf).hexdigest()
+        with self.SessionLocal() as db:
+            script = db.get(EvaluationScript, fixture["script_id"])
+            script.pdf_sha256 = expected_digest
+            db.commit()
+
+        with patch("app.main.get_object", return_value=tampered_pdf) as get_object:
+            response = self.client.get(
+                f"/evaluator/scripts/{fixture['script_id']}/pdf",
+                headers={"Authorization": f"Bearer {self.evaluator_token}"},
+            )
+
+        self.assertEqual(response.status_code, 503, response.text)
+        self.assertEqual(response.json()["detail"], "Stored PDF integrity check failed.")
+        get_object.assert_called_once_with("unused-test-object.pdf")
+
     def test_submitted_evaluation_rejects_draft_changes_and_preserves_hash(self):
         fixture = self._create_evaluation_assignment()
         headers = {"Authorization": f"Bearer {self.evaluator_token}"}
