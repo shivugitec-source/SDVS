@@ -312,3 +312,54 @@ test("JSON export excludes raw PDF payload while preserving anonymous valuation 
   assert.equal(Object.hasOwn(exported.records[0], "fileData"), false);
   assert.ok(!JSON.stringify(exported).includes("SHOULD_NOT_EXPORT"));
 });
+
+
+test("demo sample loader stores one anonymous PDF and ignores duplicate loads", async () => {
+  const loader = html.match(/async function loadDemoSample\\(\\)\\{[\\s\\S]*?\\n\\}/)?.[0];
+  assert.ok(loader, "Demo sample loader implementation is missing.");
+  const payload = html.match(/const DEMO_PDF_B64="([A-Za-z0-9+/=]+)"/)?.[1];
+  assert.ok(payload, "Embedded demo PDF payload is missing.");
+
+  const records = [];
+  const stored = [];
+  const state = { persistCalls: 0, opened: [], messages: [] };
+  const sandbox = {
+    records,
+    DEMO_PDF_B64: payload,
+    atob: value => Buffer.from(value, "base64").toString("binary"),
+    Uint8Array,
+    Blob,
+    putPDF: async (id, blob) => stored.push({ id, blob }),
+    persist: () => { state.persistCalls += 1; },
+    toast: message => state.messages.push(message),
+    openRecord: id => state.opened.push(id),
+    console
+  };
+
+  vm.runInNewContext(`${loader}\\nglobalThis.runDemoSample = loadDemoSample;`, sandbox);
+  await sandbox.runDemoSample();
+
+  assert.equal(stored.length, 1);
+  assert.equal(stored[0].id, "sdvs-demo-script-001");
+  assert.equal(stored[0].blob.type, "application/pdf");
+  const pdf = Buffer.from(await stored[0].blob.arrayBuffer());
+  assert.equal(pdf.subarray(0, 5).toString("ascii"), "%PDF-");
+  assert.equal(records.length, 1);
+  assert.equal(records[0].id, "sdvs-demo-script-001");
+  assert.equal(records[0].pdfKey, records[0].id);
+  assert.equal(records[0].code, "SDVS-DEMO-001");
+  assert.equal(records[0].subject, "Mathematics (Demo)");
+  assert.equal(records[0].status, "Pending");
+  assert.equal(records[0].demo, true);
+  assert.equal(records[0].questions.length, 3);
+  assert.equal(Object.hasOwn(records[0], "fileData"), false);
+  assert.equal(state.persistCalls, 1);
+  assert.deepEqual(state.opened, ["sdvs-demo-script-001"]);
+
+  await sandbox.runDemoSample();
+  assert.equal(stored.length, 1, "Duplicate loading must not overwrite the stored PDF.");
+  assert.equal(records.length, 1, "Duplicate loading must not create another record.");
+  assert.equal(state.persistCalls, 1, "Duplicate loading must not rewrite the record.");
+  assert.deepEqual(state.opened, ["sdvs-demo-script-001"]);
+  assert.match(state.messages.at(-1), /already loaded/i);
+});
