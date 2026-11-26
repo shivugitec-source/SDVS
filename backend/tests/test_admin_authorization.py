@@ -13,7 +13,7 @@ from sqlalchemy.pool import StaticPool
 
 from app.config import settings
 from app.db import Base, get_db
-from app.main import app, claim_otp_attempt, get_otp_request_user_for_update, otp_digest
+from app.main import app, assigned_script, claim_otp_attempt, get_evaluation_for_update, get_otp_request_user_for_update, otp_digest
 from app.models import (Allocation, Evaluation, EvaluationScript, Examination, Institution, OTPChallenge, Question, QuestionMark, Role, Status, Subject, User, UserProfile)
 from app.security import create_token
 
@@ -682,6 +682,7 @@ class AdminAuthorizationTests(unittest.TestCase):
                 "allocation_id": allocation.id,
                 "evaluation_id": evaluation.id,
                 "script_id": script.id,
+                "question_id": question.id,
             }
 
     def test_revoked_allocation_cannot_submit_a_saved_draft(self):
@@ -725,6 +726,54 @@ class AdminAuthorizationTests(unittest.TestCase):
             self.assertEqual(script.status, "SUBMITTED")
 
 
+    def test_draft_save_and_submission_lock_allocation_before_evaluation(self):
+        fixture = self._create_evaluation_assignment()
+        events = []
 
-if __name__ == "__main__":
-    unittest.main()
+        def track_assignment(script_id, user, db, **kwargs):
+            events.append(("allocation", kwargs.get("lock_allocation")))
+            return assigned_script(script_id, user, db, **kwargs)
+
+        def track_evaluation(db, evaluator_id, **kwargs):
+            events.append(("evaluation", kwargs))
+            return get_evaluation_for_update(db, evaluator_id, **kwargs)
+
+        headers = {"Authorization": f"Bearer {self.evaluator_token}"}
+        with (
+            patch("app.main.assigned_script", side_effect=track_assignment),
+            patch("app.main.get_evaluation_for_update", side_effect=track_evaluation),
+        ):
+            saved = self.client.post(
+                "/evaluations",
+                json={
+                    "script_id": fixture["script_id"],
+                    "marks": [{"question_id": fixture["question_id"], "marks": 6}],
+                },
+                headers=headers,
+            )
+        self.assertEqual(saved.status_code, 200, saved.text)
+        self.assertEqual(
+            events,
+            [
+                ("allocation", True),
+                ("evaluation", {"script_id": fixture["script_id"]}),
+            ],
+        )
+
+        events.clear()
+        with (
+            patch("app.main.assigned_script", side_effect=track_assignment),
+            patch("app.main.get_evaluation_for_update", side_effect=track_evaluation),
+        ):
+            submitted = self.client.post(
+                f"/evaluations/{fixture['evaluation_id']}/submit",
+                headers=headers,
+            )
+        self.assertEqual(submitted.status_code, 200, submitted.text)
+        self.assertEqual(
+            events,
+            [
+                ("allocation", True),
+                ("evaluation", {"evaluation_id": fixture["evaluation_id"]}),
+            ],
+        )

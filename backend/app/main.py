@@ -199,6 +199,26 @@ def assigned_script(script_id, user, db, *, lock_allocation=False):
         raise HTTPException(404, "Script not found")
     return script
 
+
+def get_evaluation_for_update(
+    db: Session,
+    evaluator_id: str,
+    *,
+    evaluation_id: str | None = None,
+    script_id: str | None = None,
+):
+    """Lock and refresh one evaluator's draft row after its allocation is locked."""
+    if (evaluation_id is None) == (script_id is None):
+        raise ValueError("Provide exactly one of evaluation_id or script_id.")
+    statement = select(Evaluation).where(Evaluation.evaluator_id == evaluator_id)
+    if evaluation_id is not None:
+        statement = statement.where(Evaluation.id == evaluation_id)
+    else:
+        statement = statement.where(Evaluation.script_id == script_id)
+    return db.scalar(
+        statement.with_for_update().execution_options(populate_existing=True)
+    )
+
 @app.get("/evaluator/scripts/{script_id}/questions")
 def assigned_questions(script_id: str, db: Session = Depends(get_db), user: User = Depends(require_roles("EVALUATOR"))):
     script = assigned_script(script_id, user, db)
@@ -229,8 +249,9 @@ def get_evaluation(script_id: str, db: Session = Depends(get_db), user: User = D
 
 @app.post("/evaluations")
 def save_draft(body: EvaluationIn, db: Session = Depends(get_db), user: User = Depends(require_roles("EVALUATOR"))):
-    script = assigned_script(body.script_id, user, db)
-    ev = db.scalar(select(Evaluation).where(Evaluation.script_id == script.id, Evaluation.evaluator_id == user.id))
+    # Serialize draft writes and submission for this assignment.
+    script = assigned_script(body.script_id, user, db, lock_allocation=True)
+    ev = get_evaluation_for_update(db, user.id, script_id=script.id)
     if ev and ev.status != Status.DRAFT: raise HTTPException(409, "Submitted evaluation is locked")
     if not ev: ev = Evaluation(script_id=script.id, evaluator_id=user.id, status=Status.DRAFT); db.add(ev); db.flush()
     questions = db.scalars(select(Question).where(Question.subject_id == script.subject_id)).all()
@@ -251,10 +272,13 @@ def save_draft(body: EvaluationIn, db: Session = Depends(get_db), user: User = D
 def submit(evaluation_id: str, db: Session = Depends(get_db), user: User = Depends(require_roles("EVALUATOR"))):
     ev = db.get(Evaluation, evaluation_id)
     if not ev or ev.evaluator_id != user.id: raise HTTPException(404, "Evaluation not found")
-    if ev.status != Status.DRAFT: raise HTTPException(409, "Already submitted")
-    # Recheck and lock the active assignment through the submission commit.
-    # This prevents a revoked allocation from being used by a stale draft.
+    # Use the same lock order as draft saves: allocation first, evaluation second.
+    # Refresh the evaluation after acquiring both locks so a concurrent save or
+    # submission cannot commit marks that disagree with the submitted hash.
     script = assigned_script(ev.script_id, user, db, lock_allocation=True)
+    ev = get_evaluation_for_update(db, user.id, evaluation_id=evaluation_id)
+    if not ev: raise HTTPException(404, "Evaluation not found")
+    if ev.status != Status.DRAFT: raise HTTPException(409, "Already submitted")
     questions = db.scalars(select(Question).where(Question.subject_id == script.subject_id)).all()
     marks = db.scalars(select(QuestionMark).where(QuestionMark.evaluation_id == ev.id)).all(); byq = {m.question_id: m for m in marks}
     missing = [q.question_number for q in questions if q.id not in byq]

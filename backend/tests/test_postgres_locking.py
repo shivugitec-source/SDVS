@@ -7,8 +7,8 @@ from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import sessionmaker
 
 from app.db import Base
-from app.main import assigned_script, get_otp_request_user_for_update
-from app.models import Allocation, EvaluationScript, Examination, Institution, Role, Subject, User
+from app.main import assigned_script, get_evaluation_for_update, get_otp_request_user_for_update
+from app.models import Allocation, Evaluation, EvaluationScript, Examination, Institution, Role, Status, Subject, User
 
 
 class PostgresOtpLockingTests(unittest.TestCase):
@@ -354,6 +354,103 @@ class PostgresOtpLockingTests(unittest.TestCase):
                 db.commit()
 
 
+    def test_evaluation_row_lock_blocks_competing_draft_writer_until_commit(self):
+        suffix = uuid.uuid4().hex
+        with self.SessionLocal() as db:
+            institution = Institution(
+                name="SDVS evaluation lock test",
+                code=f"EVLOCK-{suffix[:20]}",
+            )
+            db.add(institution)
+            db.flush()
+            evaluator = User(
+                institution_id=institution.id,
+                username=f"evaluation-lock-{suffix}",
+                password_hash="not-a-real-password",
+                role=Role.EVALUATOR,
+            )
+            examination = Examination(
+                institution_id=institution.id,
+                name="Evaluation row lock test",
+                academic_year="2026-27",
+            )
+            db.add_all([evaluator, examination])
+            db.flush()
+            subject = Subject(
+                examination_id=examination.id,
+                code=f"EV-{suffix[:8]}",
+                name="Evaluation row lock subject",
+                max_marks=10,
+            )
+            db.add(subject)
+            db.flush()
+            script = EvaluationScript(
+                institution_id=institution.id,
+                subject_id=subject.id,
+                anonymous_code=f"SDVS-EV-{suffix[:12]}",
+                object_key="unused-evaluation-lock-test.pdf",
+                pdf_sha256="0" * 64,
+                page_count=1,
+            )
+            db.add(script)
+            db.flush()
+            evaluation = Evaluation(
+                script_id=script.id,
+                evaluator_id=evaluator.id,
+                status=Status.DRAFT,
+            )
+            db.add(evaluation)
+            db.commit()
+            institution_id = institution.id
+            evaluator_id = evaluator.id
+            examination_id = examination.id
+            subject_id = subject.id
+            script_id = script.id
+            evaluation_id = evaluation.id
 
-if __name__ == "__main__":
-    unittest.main()
+        try:
+            with self.SessionLocal() as first, self.SessionLocal() as second:
+                first.begin()
+                locked = get_evaluation_for_update(
+                    first, evaluator_id, evaluation_id=evaluation_id
+                )
+                self.assertIsNotNone(locked)
+                self.assertEqual(locked.status, Status.DRAFT)
+
+                second.begin()
+                second.execute(text("SET LOCAL lock_timeout = '250ms'"))
+                with self.assertRaises(OperationalError):
+                    get_evaluation_for_update(
+                        second, evaluator_id, evaluation_id=evaluation_id
+                    )
+                second.rollback()
+                first.commit()
+
+                second.begin()
+                released = get_evaluation_for_update(
+                    second, evaluator_id, evaluation_id=evaluation_id
+                )
+                self.assertIsNotNone(released)
+                self.assertEqual(released.status, Status.DRAFT)
+                second.rollback()
+        finally:
+            with self.SessionLocal() as db:
+                db.query(Evaluation).filter_by(id=evaluation_id).delete(
+                    synchronize_session=False
+                )
+                db.query(EvaluationScript).filter_by(id=script_id).delete(
+                    synchronize_session=False
+                )
+                db.query(Subject).filter_by(id=subject_id).delete(
+                    synchronize_session=False
+                )
+                db.query(Examination).filter_by(id=examination_id).delete(
+                    synchronize_session=False
+                )
+                db.query(User).filter_by(id=evaluator_id).delete(
+                    synchronize_session=False
+                )
+                db.query(Institution).filter_by(id=institution_id).delete(
+                    synchronize_session=False
+                )
+                db.commit()
