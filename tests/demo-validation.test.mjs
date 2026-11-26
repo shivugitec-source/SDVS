@@ -80,7 +80,7 @@ for (const [name, source] of Object.entries(indexedDbFunctions)) {
   assert.ok(source, `IndexedDB ${name} implementation is missing.`);
 }
 
-function createIndexedDbSandbox({ writeError = false, writeAbort = false, readError = false, readAbort = false } = {}) {
+function createIndexedDbSandbox({ writeError = false, writeAbort = false, readError = false, readAbort = false, openErrorOnce = false } = {}) {
   const stored = new Map();
   const database = {
     createObjectStore(name) {
@@ -142,12 +142,21 @@ function createIndexedDbSandbox({ writeError = false, writeAbort = false, readEr
       return transaction;
     }
   };
+  let openAttempts = 0;
   const indexedDB = {
     open(name, version) {
       assert.equal(name, "sdvs_files_v2");
       assert.equal(version, 1);
-      const request = { result: database };
+      openAttempts += 1;
+      const request = {
+        result: database,
+        error: openErrorOnce && openAttempts === 1 ? new Error("IndexedDB open failed") : null
+      };
       queueMicrotask(() => {
+        if (request.error) {
+          request.onerror?.();
+          return;
+        }
         request.onupgradeneeded?.();
         request.onsuccess?.();
       });
@@ -159,7 +168,7 @@ function createIndexedDbSandbox({ writeError = false, writeAbort = false, readEr
     `let dbPromise;\n${indexedDbFunctions.open}\n${indexedDbFunctions.put}\n${indexedDbFunctions.get}\nglobalThis.api = { putPDF, getPDF };`,
     sandbox
   );
-  return sandbox.api;
+  return { ...sandbox.api, openAttempts: () => openAttempts };
 }
 test("IndexedDB adapter stores and retrieves PDF bytes", async () => {
   const api = createIndexedDbSandbox();
@@ -174,6 +183,18 @@ test("IndexedDB adapter returns null for a missing PDF key", async () => {
   assert.equal(await api.getPDF("missing-script"), null);
 });
 
+
+test("IndexedDB open failures clear the cached promise so later operations can retry", async () => {
+  const api = createIndexedDbSandbox({ openErrorOnce: true });
+  const payload = new Uint8Array([37, 80, 68, 70, 45, 49, 46, 55]);
+
+  await assert.rejects(api.putPDF("retry-after-open-error", payload), /IndexedDB open failed/);
+  await api.putPDF("retry-after-open-error", payload);
+  const restored = await api.getPDF("retry-after-open-error");
+
+  assert.deepEqual(Array.from(restored), Array.from(payload));
+  assert.equal(api.openAttempts(), 2, "A failed open must not poison the cached database promise.");
+});
 
 test("IndexedDB write transaction errors reject the save", async () => {
   const api = createIndexedDbSandbox({ writeError: true });
