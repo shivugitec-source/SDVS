@@ -726,6 +726,23 @@ class AdminAuthorizationTests(unittest.TestCase):
             self.assertEqual(script.status, "SUBMITTED")
 
 
+    def test_revoked_allocation_cannot_download_assigned_pdf(self):
+        fixture = self._create_evaluation_assignment()
+        with self.SessionLocal() as db:
+            allocation = db.get(Allocation, fixture["allocation_id"])
+            allocation.active = False
+            db.commit()
+
+        with patch("app.main.get_object") as get_object:
+            response = self.client.get(
+                f"/evaluator/scripts/{fixture['script_id']}/pdf",
+                headers={"Authorization": f"Bearer {self.evaluator_token}"},
+            )
+
+        self.assertEqual(response.status_code, 404, response.text)
+        self.assertEqual(response.json()["detail"], "Script not found")
+        get_object.assert_not_called()
+
     def test_assigned_pdf_is_served_when_stored_sha256_matches(self):
         import hashlib
 
