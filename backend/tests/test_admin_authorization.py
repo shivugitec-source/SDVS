@@ -9,7 +9,7 @@ from sqlalchemy.pool import StaticPool
 
 from app.config import settings
 from app.db import Base, get_db
-from app.main import app, otp_digest
+from app.main import app, claim_otp_attempt, otp_digest
 from app.models import Institution, OTPChallenge, Role, User, UserProfile
 from app.security import create_token
 
@@ -260,6 +260,39 @@ class AdminAuthorizationTests(unittest.TestCase):
             self.assertEqual(replay.status_code, 400)
             self.assertEqual(replay.json()["detail"], "Request a new OTP first.")
 
+
+    def test_stale_otp_request_cannot_consume_a_challenge_twice(self):
+        batch_id = "otp-concurrent-claim-test-0001"
+        expires_at = datetime.now(timezone.utc) + timedelta(minutes=5)
+        with self.SessionLocal() as db:
+            challenge = OTPChallenge(
+                user_id=self.master_id,
+                batch_id=batch_id,
+                channel="email",
+                code_hash=otp_digest("123123"),
+                expires_at=expires_at,
+            )
+            db.add(challenge)
+            db.commit()
+            challenge_id = challenge.id
+
+        # Model two requests that both read the same unconsumed challenge.
+        # The second keeps a detached, stale snapshot while the first commits.
+        with self.SessionLocal() as db:
+            stale_challenge = db.get(OTPChallenge, challenge_id)
+            db.expunge(stale_challenge)
+
+        with self.SessionLocal() as db:
+            current_challenge = db.get(OTPChallenge, challenge_id)
+            self.assertTrue(claim_otp_attempt(db, current_challenge, consume=True))
+            db.commit()
+
+        with self.SessionLocal() as db:
+            self.assertFalse(claim_otp_attempt(db, stale_challenge, consume=True))
+            db.rollback()
+            persisted = db.get(OTPChallenge, challenge_id)
+            self.assertTrue(persisted.consumed)
+            self.assertEqual(persisted.attempts, 1)
 
     def test_expired_otp_is_rejected_even_when_the_code_matches(self):
         email = "master-a@example.test"

@@ -6,7 +6,7 @@ from fastapi import FastAPI, Depends, HTTPException, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
-from sqlalchemy import select, func, text
+from sqlalchemy import select, func, text, update
 from pypdf import PdfReader, PdfWriter
 from .db import Base, engine, get_db, SessionLocal
 from .models import *
@@ -262,6 +262,23 @@ def otp_digest(code:str)->str:
     secret=(settings.otp_secret or settings.jwt_secret).encode()
     return hmac.new(secret,code.encode(),hashlib.sha256).hexdigest()
 
+def claim_otp_attempt(db: Session, challenge: OTPChallenge, *, consume: bool) -> bool:
+    """Atomically claim one OTP attempt so concurrent requests cannot reuse it."""
+    result = db.execute(
+        update(OTPChallenge)
+        .where(
+            OTPChallenge.id == challenge.id,
+            OTPChallenge.consumed.is_(False),
+            OTPChallenge.attempts < 5,
+        )
+        .values(
+            attempts=OTPChallenge.attempts + 1,
+            consumed=consume,
+        )
+        .execution_options(synchronize_session=False)
+    )
+    return result.rowcount == 1
+
 @app.post("/auth/request-otp")
 def request_otp(body: OTPRequestIn, db: Session = Depends(get_db)):
     email=body.email.strip().lower()
@@ -300,10 +317,18 @@ def verify_otp(body: OTPVerifyIn, db: Session = Depends(get_db)):
     if expiry.tzinfo is None: expiry=expiry.replace(tzinfo=timezone.utc)
     if expiry < now: raise HTTPException(400,"OTP expired. Request a new one.")
     if challenge.attempts>=5: raise HTTPException(429,"Too many incorrect attempts. Request a new OTP.")
-    challenge.attempts+=1
-    if not hmac.compare_digest(challenge.code_hash,otp_digest(body.code)):
-        db.commit(); raise HTTPException(400,"Incorrect OTP.")
-    challenge.consumed=True
+
+    challenge_id=challenge.id
+    correct=hmac.compare_digest(challenge.code_hash,otp_digest(body.code))
+    if not claim_otp_attempt(db,challenge,consume=correct):
+        db.rollback()
+        latest=db.get(OTPChallenge,challenge_id)
+        if latest and latest.attempts>=5:
+            raise HTTPException(429,"Too many incorrect attempts. Request a new OTP.")
+        raise HTTPException(400,"Request a new OTP first.")
+    if not correct:
+        db.commit()
+        raise HTTPException(400,"Incorrect OTP.")
     if channel=="email": profile.email_verified=True
     else: profile.phone_verified=True
     db.commit()
