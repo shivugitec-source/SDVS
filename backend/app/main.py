@@ -221,7 +221,8 @@ def get_evaluation_for_update(
 
 @app.get("/evaluator/scripts/{script_id}/questions")
 def assigned_questions(script_id: str, db: Session = Depends(get_db), user: User = Depends(require_roles("EVALUATOR"))):
-    script = assigned_script(script_id, user, db)
+    # Serialize question/rubric reads with allocation revocation.
+    script = assigned_script(script_id, user, db, lock_allocation=True)
     return [{"id": q.id, "question_number": q.question_number, "max_marks": float(q.max_marks), "rubric": q.rubric}
             for q in db.scalars(select(Question).where(Question.subject_id == script.subject_id)).all()]
 
@@ -244,7 +245,8 @@ def assigned_pdf(script_id: str, db: Session = Depends(get_db), user: User = Dep
 
 @app.get("/evaluator/scripts/{script_id}/evaluation")
 def get_evaluation(script_id: str, db: Session = Depends(get_db), user: User = Depends(require_roles("EVALUATOR"))):
-    assigned_script(script_id, user, db)
+    # Serialize saved-mark reads with allocation revocation.
+    assigned_script(script_id, user, db, lock_allocation=True)
     ev = db.scalar(select(Evaluation).where(Evaluation.script_id == script_id, Evaluation.evaluator_id == user.id))
     if not ev: return {"id": None, "status": "DRAFT", "marks": []}
     marks = db.scalars(select(QuestionMark).where(QuestionMark.evaluation_id == ev.id)).all()
