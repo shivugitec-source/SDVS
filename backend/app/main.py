@@ -227,7 +227,8 @@ def assigned_questions(script_id: str, db: Session = Depends(get_db), user: User
 
 @app.get("/evaluator/scripts/{script_id}/pdf")
 def assigned_pdf(script_id: str, db: Session = Depends(get_db), user: User = Depends(require_roles("EVALUATOR"))):
-    script = assigned_script(script_id, user, db)
+    # Keep revocation serialized with the authorization check and object retrieval.
+    script = assigned_script(script_id, user, db, lock_allocation=True)
     try:
         content = get_object(script.object_key)
     except FileNotFoundError:

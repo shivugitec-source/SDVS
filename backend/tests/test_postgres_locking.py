@@ -7,7 +7,7 @@ from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import sessionmaker
 
 from app.db import Base
-from app.main import assigned_script, get_evaluation_for_update, get_otp_request_user_for_update
+from app.main import assigned_pdf, assigned_script, get_evaluation_for_update, get_otp_request_user_for_update
 from app.models import Allocation, Evaluation, EvaluationScript, Examination, Institution, Role, Status, Subject, User
 
 
@@ -436,6 +436,117 @@ class PostgresOtpLockingTests(unittest.TestCase):
         finally:
             with self.SessionLocal() as db:
                 db.query(Evaluation).filter_by(id=evaluation_id).delete(
+                    synchronize_session=False
+                )
+                db.query(EvaluationScript).filter_by(id=script_id).delete(
+                    synchronize_session=False
+                )
+                db.query(Subject).filter_by(id=subject_id).delete(
+                    synchronize_session=False
+                )
+                db.query(Examination).filter_by(id=examination_id).delete(
+                    synchronize_session=False
+                )
+                db.query(User).filter_by(id=evaluator_id).delete(
+                    synchronize_session=False
+                )
+                db.query(Institution).filter_by(id=institution_id).delete(
+                    synchronize_session=False
+                )
+                db.commit()
+
+
+    def test_pdf_download_holds_active_allocation_lock_until_response_prepared(self):
+        import hashlib
+        from unittest.mock import patch
+
+        suffix = uuid.uuid4().hex
+        pdf_bytes = b"%PDF-1.4\\n% allocation lock fixture\\n%%EOF\\n"
+        with self.SessionLocal() as db:
+            institution = Institution(
+                name="SDVS PDF allocation lock test",
+                code=f"PDFLOCK-{suffix[:20]}",
+            )
+            db.add(institution)
+            db.flush()
+            evaluator = User(
+                institution_id=institution.id,
+                username=f"pdf-allocation-lock-{suffix}",
+                password_hash="not-a-real-password",
+                role=Role.EVALUATOR,
+            )
+            examination = Examination(
+                institution_id=institution.id,
+                name="PDF allocation lock test",
+                academic_year="2026-27",
+            )
+            db.add_all([evaluator, examination])
+            db.flush()
+            subject = Subject(
+                examination_id=examination.id,
+                code=f"PDFL-{suffix[:8]}",
+                name="PDF allocation lock subject",
+                max_marks=10,
+            )
+            db.add(subject)
+            db.flush()
+            script = EvaluationScript(
+                institution_id=institution.id,
+                subject_id=subject.id,
+                anonymous_code=f"SDVS-PDFL-{suffix[:12]}",
+                object_key="unused-pdf-allocation-lock-test.pdf",
+                pdf_sha256=hashlib.sha256(pdf_bytes).hexdigest(),
+                page_count=1,
+            )
+            db.add(script)
+            db.flush()
+            allocation = Allocation(
+                script_id=script.id,
+                evaluator_id=evaluator.id,
+                active=True,
+            )
+            db.add(allocation)
+            db.commit()
+            institution_id = institution.id
+            evaluator_id = evaluator.id
+            examination_id = examination.id
+            subject_id = subject.id
+            script_id = script.id
+            allocation_id = allocation.id
+
+        try:
+            with self.SessionLocal() as first, self.SessionLocal() as second:
+                first.begin()
+                evaluator = first.get(User, evaluator_id)
+                with patch("app.main.get_object", return_value=pdf_bytes) as get_object:
+                    response = assigned_pdf(script_id, first, evaluator)
+                self.assertEqual(response.status_code, 200)
+                self.assertEqual(response.headers["content-type"], "application/pdf")
+                get_object.assert_called_once_with("unused-pdf-allocation-lock-test.pdf")
+
+                second.begin()
+                second.execute(text("SET LOCAL lock_timeout = '250ms'"))
+                with self.assertRaises(OperationalError):
+                    second.execute(
+                        text("UPDATE allocations SET active = false WHERE id = :id"),
+                        {"id": allocation_id},
+                    )
+                second.rollback()
+                first.commit()
+
+                second.begin()
+                second.execute(
+                    text("UPDATE allocations SET active = false WHERE id = :id"),
+                    {"id": allocation_id},
+                )
+                second.commit()
+
+            with self.SessionLocal() as db:
+                allocation = db.get(Allocation, allocation_id)
+                self.assertFalse(allocation.active)
+        finally:
+            with self.SessionLocal() as db:
+                db.query(Allocation).filter_by(id=allocation_id).delete(
                     synchronize_session=False
                 )
                 db.query(EvaluationScript).filter_by(id=script_id).delete(
