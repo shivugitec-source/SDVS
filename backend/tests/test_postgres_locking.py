@@ -81,5 +81,172 @@ class PostgresOtpLockingTests(unittest.TestCase):
                 db.commit()
 
 
+    def test_concurrent_otp_requests_serialize_account_rate_limit(self):
+        from concurrent.futures import ThreadPoolExecutor
+        from datetime import datetime, timedelta, timezone
+        from threading import Event, Lock
+        import time
+        from unittest.mock import patch
+
+        from fastapi import HTTPException
+        from app.main import get_otp_request_user_for_update as lock_user, request_otp
+        from app.models import OTPChallenge, UserProfile
+        from app.schemas import OTPRequestIn
+
+        suffix = uuid.uuid4().hex
+        email = f"otp-rate-{suffix}@example.test"
+        phone = "+91" + str(int(suffix[:10], 16)).zfill(10)
+        now = datetime.now(timezone.utc)
+
+        with self.SessionLocal() as db:
+            institution = Institution(
+                name="SDVS concurrent OTP rate-limit test",
+                code=f"OTPRATE-{suffix}",
+            )
+            db.add(institution)
+            db.flush()
+            user = User(
+                institution_id=institution.id,
+                username=f"otp-rate-{suffix}",
+                password_hash="not-a-real-password",
+                role=Role.SUPER_ADMIN,
+            )
+            db.add(user)
+            db.flush()
+            db.add(
+                UserProfile(
+                    user_id=user.id,
+                    full_name="Fictional OTP Rate Test",
+                    email=email,
+                    phone=phone,
+                )
+            )
+            db.add(
+                OTPChallenge(
+                    user_id=user.id,
+                    batch_id=f"seed-{suffix[:20]}",
+                    channel="email",
+                    code_hash="0" * 64,
+                    expires_at=now + timedelta(minutes=5),
+                    created_at=now,
+                )
+            )
+            db.commit()
+            user_id = user.id
+            institution_id = institution.id
+
+        first_lock_acquired = Event()
+        release_first_lock = Event()
+        second_lock_attempted = Event()
+        call_counter_lock = Lock()
+        call_count = 0
+
+        def coordinated_lock(db, requested_user_id):
+            nonlocal call_count
+            with call_counter_lock:
+                call_count += 1
+                call_number = call_count
+
+            if call_number == 1:
+                locked_user = lock_user(db, requested_user_id)
+                first_lock_acquired.set()
+                if not release_first_lock.wait(timeout=5):
+                    raise TimeoutError("Timed out waiting to release the first OTP account lock.")
+                return locked_user
+
+            if call_number == 2:
+                second_lock_attempted.set()
+            return lock_user(db, requested_user_id)
+
+        def issue_request(application_name):
+            with self.SessionLocal() as db:
+                db.execute(text(f"SET application_name = '{application_name}'"))
+                try:
+                    request_otp(OTPRequestIn(email=email), db)
+                    return 200
+                except HTTPException as exc:
+                    db.rollback()
+                    return exc.status_code
+                finally:
+                    db.rollback()
+                    db.execute(text("RESET application_name"))
+                    db.commit()
+
+        try:
+            with (
+                patch("app.main.get_otp_request_user_for_update", side_effect=coordinated_lock),
+                patch("app.main.send_email_otp") as email_delivery,
+                patch("app.main.send_sms_otp") as sms_delivery,
+            ):
+                with ThreadPoolExecutor(max_workers=2, thread_name_prefix="sdvs-otp-rate") as pool:
+                    first_future = pool.submit(issue_request, "sdvs_otp_first")
+                    second_future = None
+                    try:
+                        self.assertTrue(
+                            first_lock_acquired.wait(timeout=5),
+                            "First OTP request did not acquire the account lock.",
+                        )
+                        second_future = pool.submit(issue_request, "sdvs_otp_second")
+                        self.assertTrue(
+                            second_lock_attempted.wait(timeout=5),
+                            "Second OTP request did not reach the account-lock helper.",
+                        )
+
+                        deadline = time.monotonic() + 5
+                        second_waiting_on_postgres_lock = False
+                        while time.monotonic() < deadline and not second_future.done():
+                            with self.SessionLocal() as observer:
+                                waiters = observer.scalar(
+                                    text(
+                                        "SELECT count(*) FROM pg_stat_activity "
+                                        "WHERE application_name = 'sdvs_otp_second' "
+                                        "AND wait_event_type = 'Lock'"
+                                    )
+                                )
+                            if waiters:
+                                second_waiting_on_postgres_lock = True
+                                break
+                            time.sleep(0.02)
+
+                        self.assertTrue(
+                            second_waiting_on_postgres_lock,
+                            "Second OTP request did not block on the first request's PostgreSQL account lock.",
+                        )
+                        self.assertFalse(
+                            second_future.done(),
+                            "Second OTP request completed while the first request still held the account lock.",
+                        )
+                    finally:
+                        release_first_lock.set()
+
+                    self.assertEqual(first_future.result(timeout=5), 200)
+                    self.assertIsNotNone(second_future)
+                    self.assertEqual(second_future.result(timeout=5), 429)
+
+                email_delivery.assert_called_once()
+                sms_delivery.assert_called_once()
+
+            with self.SessionLocal() as db:
+                challenges = db.query(OTPChallenge).filter_by(user_id=user_id).all()
+                self.assertEqual(len(challenges), 3)
+                self.assertEqual(sum(challenge.consumed for challenge in challenges), 1)
+                active = [challenge for challenge in challenges if not challenge.consumed]
+                self.assertEqual({challenge.channel for challenge in active}, {"email", "phone"})
+                self.assertEqual(len({challenge.batch_id for challenge in active}), 1)
+        finally:
+            with self.SessionLocal() as db:
+                db.query(OTPChallenge).filter_by(user_id=user_id).delete(
+                    synchronize_session=False
+                )
+                db.query(UserProfile).filter_by(user_id=user_id).delete(
+                    synchronize_session=False
+                )
+                db.query(User).filter_by(id=user_id).delete(synchronize_session=False)
+                db.query(Institution).filter_by(id=institution_id).delete(
+                    synchronize_session=False
+                )
+                db.commit()
+
+
 if __name__ == "__main__":
     unittest.main()
