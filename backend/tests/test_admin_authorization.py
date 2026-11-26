@@ -1,4 +1,5 @@
 import unittest
+import uuid
 from datetime import datetime, timedelta, timezone
 from unittest.mock import patch
 
@@ -13,7 +14,7 @@ from sqlalchemy.pool import StaticPool
 from app.config import settings
 from app.db import Base, get_db
 from app.main import app, claim_otp_attempt, get_otp_request_user_for_update, otp_digest
-from app.models import Institution, OTPChallenge, Role, User, UserProfile
+from app.models import (Allocation, Evaluation, EvaluationScript, Examination, Institution, OTPChallenge, Question, QuestionMark, Role, Status, Subject, User, UserProfile)
 from app.security import create_token
 
 
@@ -618,6 +619,111 @@ class AdminAuthorizationTests(unittest.TestCase):
         )
         self.assertEqual(replay.status_code, 400)
         self.assertEqual(replay.json()["detail"], "Request a new OTP first.")
+
+
+    def _create_evaluation_assignment(self):
+        suffix = uuid.uuid4().hex
+        with self.SessionLocal() as db:
+            examination = Examination(
+                institution_id=self.institution_id,
+                name=f"Authorization test {suffix}",
+                academic_year="2026-27",
+            )
+            db.add(examination)
+            db.flush()
+            subject = Subject(
+                examination_id=examination.id,
+                code=f"AUTH-{suffix[:8]}",
+                name="Authorization test subject",
+                max_marks=10,
+            )
+            db.add(subject)
+            db.flush()
+            question = Question(
+                subject_id=subject.id,
+                question_number="1",
+                max_marks=10,
+            )
+            db.add(question)
+            db.flush()
+            script = EvaluationScript(
+                institution_id=self.institution_id,
+                subject_id=subject.id,
+                anonymous_code=f"SDVS-{suffix[:12]}",
+                object_key="unused-test-object.pdf",
+                pdf_sha256="0" * 64,
+                page_count=1,
+            )
+            db.add(script)
+            db.flush()
+            allocation = Allocation(
+                script_id=script.id,
+                evaluator_id=self.evaluator_id,
+                active=True,
+            )
+            db.add(allocation)
+            db.flush()
+            evaluation = Evaluation(
+                script_id=script.id,
+                evaluator_id=self.evaluator_id,
+                status=Status.DRAFT,
+            )
+            db.add(evaluation)
+            db.flush()
+            db.add(
+                QuestionMark(
+                    evaluation_id=evaluation.id,
+                    question_id=question.id,
+                    marks=5,
+                )
+            )
+            db.commit()
+            return {
+                "allocation_id": allocation.id,
+                "evaluation_id": evaluation.id,
+                "script_id": script.id,
+            }
+
+    def test_revoked_allocation_cannot_submit_a_saved_draft(self):
+        fixture = self._create_evaluation_assignment()
+        with self.SessionLocal() as db:
+            allocation = db.get(Allocation, fixture["allocation_id"])
+            allocation.active = False
+            db.commit()
+
+        response = self.client.post(
+            f"/evaluations/{fixture['evaluation_id']}/submit",
+            headers={"Authorization": f"Bearer {self.evaluator_token}"},
+        )
+        self.assertEqual(response.status_code, 404)
+        self.assertEqual(response.json()["detail"], "Script not found")
+
+        with self.SessionLocal() as db:
+            evaluation = db.get(Evaluation, fixture["evaluation_id"])
+            script = db.get(EvaluationScript, fixture["script_id"])
+            self.assertEqual(evaluation.status, Status.DRAFT)
+            self.assertIsNone(evaluation.content_hash)
+            self.assertEqual(script.status, "UPLOADED")
+
+    def test_active_allocation_can_submit_a_complete_draft(self):
+        fixture = self._create_evaluation_assignment()
+        response = self.client.post(
+            f"/evaluations/{fixture['evaluation_id']}/submit",
+            headers={"Authorization": f"Bearer {self.evaluator_token}"},
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+        payload = response.json()
+        self.assertEqual(payload["status"], "SUBMITTED")
+        self.assertEqual(payload["total_marks"], "5.00")
+        self.assertRegex(payload["content_sha256"], r"^[0-9a-f]{64}$")
+
+        with self.SessionLocal() as db:
+            evaluation = db.get(Evaluation, fixture["evaluation_id"])
+            script = db.get(EvaluationScript, fixture["script_id"])
+            self.assertEqual(evaluation.status, Status.SUBMITTED)
+            self.assertEqual(evaluation.content_hash, payload["content_sha256"])
+            self.assertEqual(script.status, "SUBMITTED")
+
 
 
 if __name__ == "__main__":

@@ -7,8 +7,8 @@ from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import sessionmaker
 
 from app.db import Base
-from app.main import get_otp_request_user_for_update
-from app.models import Institution, Role, User
+from app.main import assigned_script, get_otp_request_user_for_update
+from app.models import Allocation, EvaluationScript, Examination, Institution, Role, Subject, User
 
 
 class PostgresOtpLockingTests(unittest.TestCase):
@@ -246,6 +246,113 @@ class PostgresOtpLockingTests(unittest.TestCase):
                     synchronize_session=False
                 )
                 db.commit()
+
+
+    def test_submission_authorization_locks_active_allocation_until_commit(self):
+        suffix = uuid.uuid4().hex
+        with self.SessionLocal() as db:
+            institution = Institution(
+                name="SDVS allocation lock test",
+                code=f"ALLOCK-{suffix[:20]}",
+            )
+            db.add(institution)
+            db.flush()
+            evaluator = User(
+                institution_id=institution.id,
+                username=f"allocation-lock-{suffix}",
+                password_hash="not-a-real-password",
+                role=Role.EVALUATOR,
+            )
+            examination = Examination(
+                institution_id=institution.id,
+                name="Allocation lock test",
+                academic_year="2026-27",
+            )
+            db.add_all([evaluator, examination])
+            db.flush()
+            subject = Subject(
+                examination_id=examination.id,
+                code=f"AL-{suffix[:8]}",
+                name="Allocation lock subject",
+                max_marks=10,
+            )
+            db.add(subject)
+            db.flush()
+            script = EvaluationScript(
+                institution_id=institution.id,
+                subject_id=subject.id,
+                anonymous_code=f"SDVS-AL-{suffix[:12]}",
+                object_key="unused-allocation-lock-test.pdf",
+                pdf_sha256="0" * 64,
+                page_count=1,
+            )
+            db.add(script)
+            db.flush()
+            allocation = Allocation(
+                script_id=script.id,
+                evaluator_id=evaluator.id,
+                active=True,
+            )
+            db.add(allocation)
+            db.commit()
+            institution_id = institution.id
+            evaluator_id = evaluator.id
+            examination_id = examination.id
+            subject_id = subject.id
+            script_id = script.id
+            allocation_id = allocation.id
+
+        try:
+            with self.SessionLocal() as first, self.SessionLocal() as second:
+                first.begin()
+                evaluator = first.get(User, evaluator_id)
+                authorized_script = assigned_script(
+                    script_id, evaluator, first, lock_allocation=True
+                )
+                self.assertEqual(authorized_script.id, script_id)
+
+                second.begin()
+                second.execute(text("SET LOCAL lock_timeout = '250ms'"))
+                with self.assertRaises(OperationalError):
+                    second.execute(
+                        text("UPDATE allocations SET active = false WHERE id = :id"),
+                        {"id": allocation_id},
+                    )
+                second.rollback()
+                first.commit()
+
+                second.begin()
+                second.execute(
+                    text("UPDATE allocations SET active = false WHERE id = :id"),
+                    {"id": allocation_id},
+                )
+                second.commit()
+
+            with self.SessionLocal() as db:
+                allocation = db.get(Allocation, allocation_id)
+                self.assertFalse(allocation.active)
+        finally:
+            with self.SessionLocal() as db:
+                db.query(Allocation).filter_by(id=allocation_id).delete(
+                    synchronize_session=False
+                )
+                db.query(EvaluationScript).filter_by(id=script_id).delete(
+                    synchronize_session=False
+                )
+                db.query(Subject).filter_by(id=subject_id).delete(
+                    synchronize_session=False
+                )
+                db.query(Examination).filter_by(id=examination_id).delete(
+                    synchronize_session=False
+                )
+                db.query(User).filter_by(id=evaluator_id).delete(
+                    synchronize_session=False
+                )
+                db.query(Institution).filter_by(id=institution_id).delete(
+                    synchronize_session=False
+                )
+                db.commit()
+
 
 
 if __name__ == "__main__":

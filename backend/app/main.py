@@ -183,12 +183,20 @@ def my_scripts(db: Session = Depends(get_db), user: User = Depends(require_roles
                            "subject_name": subject.name, "page_count": script.page_count, "status": script.status})
     return result
 
-def assigned_script(script_id, user, db):
+def assigned_script(script_id, user, db, *, lock_allocation=False):
     script = db.get(EvaluationScript, script_id)
-    if not script or script.institution_id != user.institution_id: raise HTTPException(404, "Script not found")
-    allocation = db.scalar(select(Allocation).where(Allocation.script_id == script.id,
-                          Allocation.evaluator_id == user.id, Allocation.active == True))
-    if not allocation: raise HTTPException(404, "Script not found")
+    if not script or script.institution_id != user.institution_id:
+        raise HTTPException(404, "Script not found")
+    allocation_query = select(Allocation).where(
+        Allocation.script_id == script.id,
+        Allocation.evaluator_id == user.id,
+        Allocation.active == True,
+    )
+    if lock_allocation:
+        allocation_query = allocation_query.with_for_update()
+    allocation = db.scalar(allocation_query)
+    if not allocation:
+        raise HTTPException(404, "Script not found")
     return script
 
 @app.get("/evaluator/scripts/{script_id}/questions")
@@ -244,7 +252,9 @@ def submit(evaluation_id: str, db: Session = Depends(get_db), user: User = Depen
     ev = db.get(Evaluation, evaluation_id)
     if not ev or ev.evaluator_id != user.id: raise HTTPException(404, "Evaluation not found")
     if ev.status != Status.DRAFT: raise HTTPException(409, "Already submitted")
-    script = db.get(EvaluationScript, ev.script_id)
+    # Recheck and lock the active assignment through the submission commit.
+    # This prevents a revoked allocation from being used by a stale draft.
+    script = assigned_script(ev.script_id, user, db, lock_allocation=True)
     questions = db.scalars(select(Question).where(Question.subject_id == script.subject_id)).all()
     marks = db.scalars(select(QuestionMark).where(QuestionMark.evaluation_id == ev.id)).all(); byq = {m.question_id: m for m in marks}
     missing = [q.question_number for q in questions if q.id not in byq]
