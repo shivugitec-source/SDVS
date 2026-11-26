@@ -114,6 +114,13 @@ class AdminAuthorizationTests(unittest.TestCase):
         Base.metadata.drop_all(bind=cls.engine)
         cls.engine.dispose()
 
+    def setUp(self):
+        # OTP tests share one in-memory database; clear prior challenges so
+        # each test exercises only the challenge it creates.
+        with self.SessionLocal() as db:
+            db.query(OTPChallenge).delete(synchronize_session=False)
+            db.commit()
+
     def test_admin_user_list_requires_authentication(self):
         response = self.client.get("/admin/users")
         self.assertEqual(response.status_code, 401)
