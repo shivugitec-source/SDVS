@@ -315,7 +315,7 @@ test("JSON export excludes raw PDF payload while preserving anonymous valuation 
 
 
 test("demo sample loader stores one anonymous PDF and ignores duplicate loads", async () => {
-  const loader = html.match(/async function loadDemoSample\\(\\)\\{[\\s\\S]*?\\n\\}/)?.[0];
+  const loader = html.match(/async function loadDemoSample\(\)\{[\s\S]*?\n\}/)?.[0];
   assert.ok(loader, "Demo sample loader implementation is missing.");
   const payload = html.match(/const DEMO_PDF_B64="([A-Za-z0-9+/=]+)"/)?.[1];
   assert.ok(payload, "Embedded demo PDF payload is missing.");
@@ -336,7 +336,7 @@ test("demo sample loader stores one anonymous PDF and ignores duplicate loads", 
     console
   };
 
-  vm.runInNewContext(`${loader}\\nglobalThis.runDemoSample = loadDemoSample;`, sandbox);
+  vm.runInNewContext(`${loader}\nglobalThis.runDemoSample = loadDemoSample;`, sandbox);
   await sandbox.runDemoSample();
 
   assert.equal(stored.length, 1);
