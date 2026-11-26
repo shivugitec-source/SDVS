@@ -18,6 +18,20 @@ permissions:
 jobs:
   validate:
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: sdvs-ci-only
+          POSTGRES_DB: sdvs_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d sdvs_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
     steps:
       - name: Check out source
         uses: actions/checkout@v4
@@ -58,4 +72,5 @@ jobs:
         env:
           JWT_SECRET: ci-only-secret-not-for-production
           OTP_SECRET: ci-only-otp-secret
+          DATABASE_URL: postgresql+psycopg://postgres:sdvs-ci-only@127.0.0.1:5432/sdvs_test
         run: python -m unittest discover -s tests -v
