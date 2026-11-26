@@ -313,8 +313,23 @@ def request_otp(body: OTPRequestIn, db: Session = Depends(get_db)):
     db.add_all([OTPChallenge(user_id=user.id,batch_id=batch_id,channel="email",code_hash=otp_digest(email_code),expires_at=expiry),
                 OTPChallenge(user_id=user.id,batch_id=batch_id,channel="phone",code_hash=otp_digest(phone_code),expires_at=expiry)])
     db.commit()
-    send_email_otp(profile.email,email_code)
-    send_sms_otp(profile.phone,phone_code)
+    try:
+        send_email_otp(profile.email,email_code)
+        send_sms_otp(profile.phone,phone_code)
+    except HTTPException:
+        # A partial delivery must never leave a usable one-channel OTP batch.
+        db.execute(
+            update(OTPChallenge)
+            .where(
+                OTPChallenge.user_id == user.id,
+                OTPChallenge.batch_id == batch_id,
+                OTPChallenge.consumed.is_(False),
+            )
+            .values(consumed=True)
+            .execution_options(synchronize_session=False)
+        )
+        db.commit()
+        raise
     return {"message":"Verification codes sent to your registered email and mobile number.",
             "email_masked":profile.email[:2]+"***"+profile.email[profile.email.index("@"):],
             "phone_masked":"******"+profile.phone[-4:],"expires_in_minutes":settings.otp_ttl_minutes}

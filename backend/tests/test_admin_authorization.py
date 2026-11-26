@@ -3,6 +3,7 @@ from datetime import datetime, timedelta, timezone
 from unittest.mock import patch
 
 from fastapi.testclient import TestClient
+from fastapi import HTTPException
 from jose import jwt
 from sqlalchemy import create_engine
 from sqlalchemy.dialects import postgresql
@@ -521,6 +522,69 @@ class AdminAuthorizationTests(unittest.TestCase):
             active = [challenge for challenge in challenges if not challenge.consumed]
             self.assertEqual({challenge.channel for challenge in active}, {"email", "phone"})
             self.assertEqual(len({challenge.batch_id for challenge in active}), 1)
+
+
+    def test_email_delivery_failure_invalidates_new_otp_batch(self):
+        with (
+            patch(
+                "app.main.send_email_otp",
+                side_effect=HTTPException(502, "Email delivery failed."),
+            ) as email_delivery,
+            patch("app.main.send_sms_otp") as sms_delivery,
+        ):
+            response = self.client.post(
+                "/auth/request-otp",
+                json={"email": "master-a@example.test"},
+            )
+
+        self.assertEqual(response.status_code, 502)
+        email_delivery.assert_called_once()
+        sms_delivery.assert_not_called()
+        with self.SessionLocal() as db:
+            challenges = db.query(OTPChallenge).filter_by(
+                user_id=self.master_id
+            ).all()
+            self.assertEqual(len(challenges), 2)
+            self.assertTrue(all(challenge.consumed for challenge in challenges))
+
+    def test_sms_delivery_failure_invalidates_partially_delivered_otp_batch(self):
+        delivered_email_codes = []
+        with (
+            patch(
+                "app.main.send_email_otp",
+                side_effect=lambda destination, code: delivered_email_codes.append(code),
+            ) as email_delivery,
+            patch(
+                "app.main.send_sms_otp",
+                side_effect=HTTPException(502, "SMS delivery failed."),
+            ) as sms_delivery,
+        ):
+            response = self.client.post(
+                "/auth/request-otp",
+                json={"email": "master-a@example.test"},
+            )
+
+        self.assertEqual(response.status_code, 502)
+        email_delivery.assert_called_once()
+        sms_delivery.assert_called_once()
+        self.assertEqual(len(delivered_email_codes), 1)
+        with self.SessionLocal() as db:
+            challenges = db.query(OTPChallenge).filter_by(
+                user_id=self.master_id
+            ).all()
+            self.assertEqual(len(challenges), 2)
+            self.assertTrue(all(challenge.consumed for challenge in challenges))
+
+        replay = self.client.post(
+            "/auth/verify-otp",
+            json={
+                "email": "master-a@example.test",
+                "channel": "email",
+                "code": delivered_email_codes[0],
+            },
+        )
+        self.assertEqual(replay.status_code, 400)
+        self.assertEqual(replay.json()["detail"], "Request a new OTP first.")
 
 
 if __name__ == "__main__":
