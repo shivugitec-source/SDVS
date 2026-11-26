@@ -279,12 +279,17 @@ def claim_otp_attempt(db: Session, challenge: OTPChallenge, *, consume: bool) ->
     )
     return result.rowcount == 1
 
+def get_otp_request_user_for_update(db: Session, user_id: str):
+    """Lock the account row so concurrent OTP quota checks serialize on PostgreSQL."""
+    return db.scalar(select(User).where(User.id == user_id).with_for_update())
+
+
 @app.post("/auth/request-otp")
 def request_otp(body: OTPRequestIn, db: Session = Depends(get_db)):
     email=body.email.strip().lower()
     profile=db.scalar(select(UserProfile).where(UserProfile.email==email))
     if not profile: raise HTTPException(404,"This email is not registered. Contact the SDVS master administrator.")
-    user=db.get(User,profile.user_id)
+    user=get_otp_request_user_for_update(db, profile.user_id)
     if not user or not user.active: raise HTTPException(403,"This account is inactive.")
     recent=db.scalar(select(func.count(OTPChallenge.id)).where(OTPChallenge.user_id==user.id, OTPChallenge.channel=="email",
         OTPChallenge.created_at >= datetime.now(timezone.utc)-__import__('datetime').timedelta(seconds=60)))

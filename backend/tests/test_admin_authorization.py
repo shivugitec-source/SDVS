@@ -5,12 +5,13 @@ from unittest.mock import patch
 from fastapi.testclient import TestClient
 from jose import jwt
 from sqlalchemy import create_engine
+from sqlalchemy.dialects import postgresql
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
 from app.config import settings
 from app.db import Base, get_db
-from app.main import app, claim_otp_attempt, otp_digest
+from app.main import app, claim_otp_attempt, get_otp_request_user_for_update, otp_digest
 from app.models import Institution, OTPChallenge, Role, User, UserProfile
 from app.security import create_token
 
@@ -460,6 +461,36 @@ class AdminAuthorizationTests(unittest.TestCase):
             self.assertEqual(challenge.attempts, 5)
             self.assertFalse(challenge.consumed)
 
+
+    def test_otp_request_rate_limit_uses_postgresql_account_row_lock(self):
+        class RecordingSession:
+            statement = None
+
+            def scalar(self, statement):
+                self.statement = statement
+                return None
+
+        recorder = RecordingSession()
+        get_otp_request_user_for_update(recorder, self.master_id)
+        sql = str(recorder.statement.compile(dialect=postgresql.dialect()))
+        self.assertIn("FOR UPDATE", sql.upper())
+        self.assertIn("FROM users", sql.lower())
+
+        with (
+            patch(
+                "app.main.get_otp_request_user_for_update",
+                wraps=get_otp_request_user_for_update,
+            ) as account_lock,
+            patch("app.main.send_email_otp"),
+            patch("app.main.send_sms_otp"),
+        ):
+            response = self.client.post(
+                "/auth/request-otp",
+                json={"email": "master-a@example.test"},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        account_lock.assert_called_once()
 
     def test_otp_requests_are_rate_limited_after_two_batches_per_minute(self):
         email = "master-a@example.test"
