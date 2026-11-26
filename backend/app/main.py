@@ -261,9 +261,31 @@ def save_draft(body: EvaluationIn, db: Session = Depends(get_db), user: User = D
         if qid not in qmap: raise HTTPException(422, "Question does not belong to this subject")
         if Decimal(str(mark.marks)) > Decimal(str(qmap[qid].max_marks)):
             raise HTTPException(422, f"Marks exceed maximum for {qmap[qid].question_number}")
-    for old in db.scalars(select(QuestionMark).where(QuestionMark.evaluation_id == ev.id)).all(): db.delete(old)
-    for qid, mark in incoming.items():
-        db.add(QuestionMark(evaluation_id=ev.id, question_id=qid, marks=mark.marks, remark=mark.remark, private_note=mark.private_note))
+    existing_marks = {
+        mark.question_id: mark
+        for mark in db.scalars(
+            select(QuestionMark).where(QuestionMark.evaluation_id == ev.id)
+        ).all()
+    }
+    for question_id, existing in existing_marks.items():
+        if question_id not in incoming:
+            db.delete(existing)
+    for question_id, mark in incoming.items():
+        existing = existing_marks.get(question_id)
+        if existing is None:
+            db.add(
+                QuestionMark(
+                    evaluation_id=ev.id,
+                    question_id=question_id,
+                    marks=mark.marks,
+                    remark=mark.remark,
+                    private_note=mark.private_note,
+                )
+            )
+        else:
+            existing.marks = mark.marks
+            existing.remark = mark.remark
+            existing.private_note = mark.private_note
     ev.total_marks = sum((Decimal(str(m.marks)) for m in incoming.values()), Decimal("0"))
     audit(db, user, "DRAFT_SAVED", "evaluation", ev.id, {"question_count": len(incoming)}); db.commit()
     return {"id": ev.id, "evaluation_id": ev.id, "status": ev.status.value, "draft_total": str(ev.total_marks)}

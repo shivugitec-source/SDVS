@@ -670,19 +670,19 @@ class AdminAuthorizationTests(unittest.TestCase):
             )
             db.add(evaluation)
             db.flush()
-            db.add(
-                QuestionMark(
-                    evaluation_id=evaluation.id,
-                    question_id=question.id,
-                    marks=5,
-                )
+            question_mark = QuestionMark(
+                evaluation_id=evaluation.id,
+                question_id=question.id,
+                marks=5,
             )
+            db.add(question_mark)
             db.commit()
             return {
                 "allocation_id": allocation.id,
                 "evaluation_id": evaluation.id,
                 "script_id": script.id,
                 "question_id": question.id,
+                "question_mark_id": question_mark.id,
             }
 
     def test_revoked_allocation_cannot_submit_a_saved_draft(self):
@@ -752,6 +752,13 @@ class AdminAuthorizationTests(unittest.TestCase):
                 headers=headers,
             )
         self.assertEqual(saved.status_code, 200, saved.text)
+        with self.SessionLocal() as db:
+            updated_marks = db.query(QuestionMark).filter_by(
+                evaluation_id=fixture["evaluation_id"]
+            ).all()
+            self.assertEqual(len(updated_marks), 1)
+            self.assertEqual(updated_marks[0].id, fixture["question_mark_id"])
+            self.assertEqual(float(updated_marks[0].marks), 6.0)
         self.assertEqual(
             events,
             [
