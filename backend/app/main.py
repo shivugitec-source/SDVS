@@ -289,6 +289,18 @@ def request_otp(body: OTPRequestIn, db: Session = Depends(get_db)):
     recent=db.scalar(select(func.count(OTPChallenge.id)).where(OTPChallenge.user_id==user.id, OTPChallenge.channel=="email",
         OTPChallenge.created_at >= datetime.now(timezone.utc)-__import__('datetime').timedelta(seconds=60)))
     if recent and recent>=2: raise HTTPException(429,"Please wait 60 seconds before requesting another OTP.")
+    # A new OTP pair replaces every older unconsumed challenge for this user.
+    # Retain consumed rows, but do not let a partially completed older batch
+    # become valid again after the replacement batch has been used.
+    db.execute(
+        update(OTPChallenge)
+        .where(
+            OTPChallenge.user_id == user.id,
+            OTPChallenge.consumed.is_(False),
+        )
+        .values(consumed=True)
+        .execution_options(synchronize_session=False)
+    )
     email_code=f"{secrets.randbelow(1000000):06d}"
     phone_code=f"{secrets.randbelow(1000000):06d}"
     batch_id=secrets.token_urlsafe(24)

@@ -1,5 +1,6 @@
 import unittest
 from datetime import datetime, timedelta, timezone
+from unittest.mock import patch
 
 from fastapi.testclient import TestClient
 from jose import jwt
@@ -260,6 +261,75 @@ class AdminAuthorizationTests(unittest.TestCase):
             self.assertEqual(replay.status_code, 400)
             self.assertEqual(replay.json()["detail"], "Request a new OTP first.")
 
+
+    def test_new_otp_batch_invalidates_older_unconsumed_challenges(self):
+        email = "master-a@example.test"
+        old_batch_id = "otp-replaced-batch-test-0001"
+        expires_at = datetime.now(timezone.utc) + timedelta(minutes=5)
+        with self.SessionLocal() as db:
+            db.add_all([
+                OTPChallenge(
+                    user_id=self.master_id,
+                    batch_id=old_batch_id,
+                    channel="email",
+                    code_hash=otp_digest("101010"),
+                    expires_at=expires_at,
+                    consumed=True,
+                ),
+                OTPChallenge(
+                    user_id=self.master_id,
+                    batch_id=old_batch_id,
+                    channel="phone",
+                    code_hash=otp_digest("202020"),
+                    expires_at=expires_at,
+                ),
+            ])
+            db.commit()
+
+        delivered = {}
+        with (
+            patch(
+                "app.main.send_email_otp",
+                side_effect=lambda destination, code: delivered.__setitem__("email", code),
+            ),
+            patch(
+                "app.main.send_sms_otp",
+                side_effect=lambda destination, code: delivered.__setitem__("phone", code),
+            ),
+            patch("app.main.secrets.randbelow", side_effect=[303030, 404040]),
+        ):
+            requested = self.client.post("/auth/request-otp", json={"email": email})
+
+        self.assertEqual(requested.status_code, 200)
+        self.assertEqual(delivered, {"email": "303030", "phone": "404040"})
+        with self.SessionLocal() as db:
+            old_phone = db.query(OTPChallenge).filter_by(
+                batch_id=old_batch_id, channel="phone"
+            ).one()
+            self.assertTrue(old_phone.consumed)
+
+        email_verified = self.client.post(
+            "/auth/verify-otp",
+            json={"email": email, "channel": "email", "code": delivered["email"]},
+        )
+        self.assertEqual(email_verified.status_code, 200)
+        self.assertFalse(email_verified.json()["both_channels_verified"])
+        self.assertNotIn("access_token", email_verified.json())
+
+        phone_verified = self.client.post(
+            "/auth/verify-otp",
+            json={"email": email, "channel": "phone", "code": delivered["phone"]},
+        )
+        self.assertEqual(phone_verified.status_code, 200)
+        self.assertTrue(phone_verified.json()["both_channels_verified"])
+        self.assertIn("access_token", phone_verified.json())
+
+        stale_phone = self.client.post(
+            "/auth/verify-otp",
+            json={"email": email, "channel": "phone", "code": "202020"},
+        )
+        self.assertEqual(stale_phone.status_code, 400)
+        self.assertEqual(stale_phone.json()["detail"], "Request a new OTP first.")
 
     def test_stale_otp_request_cannot_consume_a_challenge_twice(self):
         batch_id = "otp-concurrent-claim-test-0001"
