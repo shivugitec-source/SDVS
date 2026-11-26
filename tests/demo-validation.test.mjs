@@ -363,3 +363,27 @@ test("demo sample loader stores one anonymous PDF and ignores duplicate loads", 
   assert.deepEqual(state.opened, ["sdvs-demo-script-001"]);
   assert.match(state.messages.at(-1), /already loaded/i);
 });
+
+
+const backendWorkflow = await readFile(new URL("../.github/workflows/backend-ci.yml", import.meta.url), "utf8");
+const demoWorkflow = await readFile(new URL("../.github/workflows/demo-ci.yml", import.meta.url), "utf8");
+
+test("GitHub Actions use Node 24-compatible action majors", () => {
+  const requiredActions = [
+    [backendWorkflow, ["actions/checkout@v7", "actions/setup-python@v7"]],
+    [demoWorkflow, ["actions/checkout@v7", "actions/setup-python@v7", "actions/setup-node@v7"]],
+    [pagesWorkflow, [
+      "actions/checkout@v7",
+      "actions/configure-pages@v6",
+      "actions/github-script@v9",
+      "actions/upload-pages-artifact@v5",
+      "actions/deploy-pages@v5"
+    ]]
+  ];
+
+  for (const [workflow, actions] of requiredActions) {
+    for (const action of actions) {
+      assert.ok(workflow.includes(`uses: ${action}`), `Workflow must use ${action}.`);
+    }
+  }
+});
