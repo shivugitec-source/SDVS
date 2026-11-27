@@ -2,16 +2,8 @@ name: SDVS demo validation
 on:
   push:
     branches: [main]
-    paths:
-      - "docs/**"
-      - "tests/**"
-      - ".github/workflows/demo-ci.yml"
   pull_request:
     branches: [main]
-    paths:
-      - "docs/**"
-      - "tests/**"
-      - ".github/workflows/demo-ci.yml"
   workflow_dispatch:
 
 permissions:

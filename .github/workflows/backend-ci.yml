@@ -2,16 +2,8 @@ name: SDVS backend validation
 on:
   push:
     branches: [main]
-    paths:
-      - "backend/**"
-      - "tests/**"
-      - ".github/workflows/backend-ci.yml"
   pull_request:
     branches: [main]
-    paths:
-      - "backend/**"
-      - "tests/**"
-      - ".github/workflows/backend-ci.yml"
   workflow_dispatch:
 
 permissions:
