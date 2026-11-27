@@ -108,7 +108,7 @@ def create_question(subject_id: str, body: QuestionIn, db: Session = Depends(get
     return {"id": q.id, "question_number": q.question_number, "max_marks": float(q.max_marks)}
 
 @app.get("/subjects/{subject_id}/questions")
-def list_questions(subject_id: str, db: Session = Depends(get_db), user: User = Depends(current_user)):
+def list_questions(subject_id: str, db: Session = Depends(get_db), user: User = Depends(require_roles("SUPER_ADMIN", "EXAM_CONTROLLER", "CHIEF_EXAMINER"))):
     subject = db.get(Subject, subject_id)
     if not subject or db.get(Examination, subject.examination_id).institution_id != user.institution_id:
         raise HTTPException(404, "Subject not found")
