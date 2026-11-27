@@ -977,6 +977,52 @@ class AdminAuthorizationTests(unittest.TestCase):
             db.commit()
             return subject.id
 
+    def test_script_upload_requires_admin_role_before_storage(self):
+        subject_id = self._create_upload_subject()
+        suffix = uuid.uuid4().hex
+        candidate_name = f"Fictional Unauthorized Candidate {suffix[:8]}"
+        register_number = f"REG-UNAUTHORIZED-{suffix[:12].upper()}"
+        writer = PdfWriter()
+        writer.add_blank_page(width=72, height=72)
+        source = io.BytesIO()
+        writer.write(source)
+        pdf = source.getvalue()
+        form_data = {
+            "subject_id": subject_id,
+            "candidate_name": candidate_name,
+            "register_number": register_number,
+        }
+        files = {"file": ("unauthorized.pdf", pdf, "application/pdf")}
+
+        with patch("app.main.put_object") as put_object:
+            unauthenticated = self.client.post(
+                "/scripts/upload",
+                data=form_data,
+                files=files,
+            )
+            evaluator_denied = self.client.post(
+                "/scripts/upload",
+                data=form_data,
+                files=files,
+                headers={"Authorization": f"Bearer {self.evaluator_token}"},
+            )
+
+        self.assertEqual(unauthenticated.status_code, 401, unauthenticated.text)
+        self.assertEqual(evaluator_denied.status_code, 403, evaluator_denied.text)
+        put_object.assert_not_called()
+
+        with self.SessionLocal() as db:
+            self.assertIsNone(
+                db.query(Candidate).filter_by(register_number=register_number).first()
+            )
+            self.assertIsNone(
+                db.query(EvaluationScript)
+                .filter_by(subject_id=subject_id)
+                .filter(EvaluationScript.anonymous_code.like("SDVS-%"))
+                .filter(EvaluationScript.object_key.like("SDVS-%"))
+                .first()
+            )
+
     def test_pdf_upload_rejects_payload_over_configured_limit_before_storage(self):
         subject_id = self._create_upload_subject()
         oversized_pdf = b"%PDF-" + b"x" * (1024 * 1024 - 4)
