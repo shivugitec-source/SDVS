@@ -92,9 +92,19 @@ jobs:
           assert len(pdf) > 300, "Demo PDF payload is unexpectedly small"
           print(f"Embedded demo PDF looks structurally valid ({len(pdf)} bytes).")
           PY
-      - name: Install pinned React evaluator dependencies
+      - name: Generate deterministic npm lockfile
         working-directory: frontend
-        run: npm install --no-audit --no-fund
+        run: npm install --package-lock-only --ignore-scripts --no-audit --no-fund
+      - name: Verify clean npm lockfile installation
+        working-directory: frontend
+        run: npm ci --no-audit --no-fund
+      - name: Export generated lockfile for repository commit
+        uses: actions/upload-artifact@v4
+        with:
+          name: sdvs-frontend-package-lock
+          path: frontend/package-lock.json
+          if-no-files-found: error
+          retention-days: 1
       - name: Build React evaluator (TypeScript + Vite)
         working-directory: frontend
         run: npm run build
