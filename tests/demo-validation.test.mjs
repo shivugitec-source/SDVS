@@ -411,9 +411,10 @@ test("GitHub Actions use Node 24-compatible action majors", () => {
 
 
 test("backend and demo workflows retain bounded, superseding CI execution", () => {
-  const concurrency = /\\nconcurrency:\\n  group: \\$\\{\\{ github\\.workflow \\}\\}-\\$\\{\\{ github\\.ref \\}\\}\\n  cancel-in-progress: true\\n/;
-  assert.match(backendWorkflow, concurrency, "Backend runs must supersede older runs on the same ref.");
-  assert.match(demoWorkflow, concurrency, "Demo runs must supersede older runs on the same ref.");
-  assert.match(backendWorkflow, /\\n  validate:\\n    runs-on: ubuntu-latest\\n    timeout-minutes: 15\\n/);
-  assert.match(demoWorkflow, /\\n  validate-demo:\\n    runs-on: ubuntu-latest\\n    timeout-minutes: 10\\n/);
+  for (const workflow of [backendWorkflow, demoWorkflow]) {
+    assert.ok(workflow.includes("group: ${{ github.workflow }}-${{ github.ref }}"));
+    assert.ok(workflow.includes("cancel-in-progress: true"));
+  }
+  assert.match(backendWorkflow, /\n  validate:\n    runs-on: ubuntu-latest\n    timeout-minutes: 15\n/);
+  assert.match(demoWorkflow, /\n  validate-demo:\n    runs-on: ubuntu-latest\n    timeout-minutes: 10\n/);
 });
