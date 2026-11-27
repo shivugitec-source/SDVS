@@ -1,4 +1,5 @@
 import { useState } from 'react';
+import { parseOtpVerification } from './auth-contract.mjs';
 
 type Language = 'en' | 'kn';
 type Script = { script_id: string; anonymous_code: string; subject_name: string; page_count: number; status: string };
@@ -69,13 +70,15 @@ export default function App() {
     return response;
   }
 
-  async function load(auth = token) {
+  async function load(auth = token): Promise<boolean> {
     try {
       const response = await request('/evaluator/scripts', {}, auth);
       setScripts(await response.json());
       setMsg('');
+      return true;
     } catch (error) {
       setMsg(error instanceof Error ? error.message : 'Unable to load assigned scripts.');
+      return false;
     }
   }
 
@@ -111,17 +114,23 @@ export default function App() {
         method: 'POST',
         body: JSON.stringify({ email: email.trim().toLowerCase(), channel, code: otp })
       }, '');
-      const result = await response.json();
+      const result = parseOtpVerification(await response.json());
       setOtp('');
-      if (result.access_token && result.both_channels_verified) {
-        setToken(result.access_token);
+      if (result.kind === 'authenticated') {
+        if (result.user.role !== 'EVALUATOR') {
+          setOtpRequested(false);
+          setOtpStage('email');
+          setMsg('This account is not authorized for evaluator access. Use the appropriate SDVS portal.');
+          return;
+        }
+        setToken(result.accessToken);
         setOtpStage('authenticated');
         setOtpRequested(false);
-        await load(result.access_token);
-        setMsg('Both verification channels confirmed. Secure evaluator session started.');
+        const scriptsLoaded = await load(result.accessToken);
+        if (scriptsLoaded) setMsg('Both verification channels confirmed. Secure evaluator session started.');
       } else {
-        setOtpStage(result.next_channel === 'email' ? 'email' : 'phone');
-        setMsg(channel === 'email' ? 'Email verified. Now verify your registered mobile number.' : 'Mobile verified. Verify your email to finish sign-in.');
+        setOtpStage(result.nextChannel);
+        setMsg(result.nextChannel === 'phone' ? 'Email verified. Now verify your registered mobile number.' : 'Mobile verified. Verify your email to finish sign-in.');
       }
     } catch (error) {
       setMsg(error instanceof Error ? error.message : 'OTP verification failed.');
