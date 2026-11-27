@@ -520,14 +520,14 @@ test("backend keeps password login disabled and evaluator routes role-protected"
 
 
 test("admin API status messages render untrusted response text without HTML interpretation", () => {
-  const helper = adminHtml.match(/function message\\(el,text,error=false\\)\\{[^}]*\\}/)?.[0];
+  const helper = adminHtml.match(/function message\(el,text,error=false\)\{[^}]*\}/)?.[0];
   assert.ok(helper, "Admin status message helper is missing.");
   const target = { children: [], replaceChildren(node) { this.children = [node]; } };
   const sandbox = {
     document: { createElement(tag) { assert.equal(tag, "div"); return {}; } },
     $(id) { assert.equal(id, "loginStatus"); return target; }
   };
-  vm.runInNewContext(helper + "\\nglobalThis.renderMessage = message;", sandbox);
+  vm.runInNewContext(helper + "\nglobalThis.renderMessage = message;", sandbox);
   const payload = "<img src=x onerror=alert(1)>";
   sandbox.renderMessage("loginStatus", payload, true);
   assert.equal(target.children.length, 1);
