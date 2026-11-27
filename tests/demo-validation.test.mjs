@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 import vm from "node:vm";
+import { parseOtpVerification } from "../frontend/src/auth-contract.mjs";
 
 const html = await readFile(new URL("../docs/index.html", import.meta.url), "utf8");
 const pagesWorkflow = await readFile(new URL("../.github/workflows/pages.yml", import.meta.url), "utf8");
@@ -441,4 +442,76 @@ test("evaluator checks PDF HTTP status and content type before displaying it", (
   assert.match(evaluatorApp, /request\('\/evaluator\/scripts\/'.*'\/pdf'\)/);
   assert.match(evaluatorApp, /if \(!pdfResponse\.headers\.get\('content-type'\)\?\.includes\('application\/pdf'\)\)/);
   assert.match(evaluatorApp, /URL\.revokeObjectURL/);
+});
+
+test("OTP response parser accepts the backend's first-channel response", () => {
+  assert.deepEqual(
+    parseOtpVerification({ verified: true, both_channels_verified: false, next_channel: "phone" }),
+    { kind: "challenge", nextChannel: "phone" }
+  );
+});
+
+test("OTP response parser accepts a bearer token only after both channels verify", () => {
+  const result = parseOtpVerification({
+    verified: true,
+    both_channels_verified: true,
+    access_token: "synthetic-test-token",
+    token_type: "bearer",
+    user: { role: "EVALUATOR" }
+  });
+  assert.equal(result.kind, "authenticated");
+  assert.equal(result.accessToken, "synthetic-test-token");
+  assert.equal(result.tokenType, "bearer");
+  assert.equal(result.user.role, "EVALUATOR");
+});
+
+test("OTP response parser rejects malformed or premature session responses", () => {
+  assert.throws(
+    () => parseOtpVerification({ verified: true, both_channels_verified: false }),
+    /invalid next verification channel/
+  );
+  assert.throws(
+    () => parseOtpVerification({
+      verified: true, both_channels_verified: false, next_channel: "phone", access_token: "premature"
+    }),
+    /before both channels/
+  );
+  assert.throws(
+    () => parseOtpVerification({
+      verified: true, both_channels_verified: true, access_token: "token", token_type: "bearer"
+    }),
+    /incomplete authenticated session/
+  );
+  assert.throws(
+    () => parseOtpVerification({ verified: false, both_channels_verified: false, next_channel: "phone" }),
+    /invalid OTP verification response/
+  );
+});
+
+test("evaluator workspace rejects other roles before storing the bearer token", () => {
+  const roleGuard = evaluatorApp.indexOf("if (result.user.role !== 'EVALUATOR')");
+  const tokenStore = evaluatorApp.indexOf("setToken(result.accessToken)");
+  assert.ok(roleGuard >= 0 && tokenStore > roleGuard, "Role authorization must precede token storage.");
+  assert.match(evaluatorApp, /This account is not authorized for evaluator access/);
+});
+
+test("script-list failures are not overwritten by a successful-login message", () => {
+  assert.match(evaluatorApp, /async function load\(auth = token\): Promise<boolean>/);
+  assert.match(evaluatorApp, /const scriptsLoaded = await load\(result\.accessToken\);\s*if \(scriptsLoaded\) setMsg\(/);
+});
+
+test("backend keeps password login disabled and evaluator routes role-protected", () => {
+  assert.match(backendMain, /@app\.post\("\/auth\/login", response_model=TokenOut\)[\s\S]*?HTTPException\(410/);
+  assert.match(backendMain, /@app\.post\("\/auth\/request-otp"\)/);
+  assert.match(backendMain, /@app\.post\("\/auth\/verify-otp"\)/);
+  for (const route of [
+    '@app.get("/evaluator/scripts")',
+    '@app.get("/evaluator/scripts/{script_id}/questions")',
+    '@app.get("/evaluator/scripts/{script_id}/evaluation")',
+    '@app.get("/evaluator/scripts/{script_id}/pdf")'
+  ]) {
+    const start = backendMain.indexOf(route);
+    assert.ok(start >= 0, `Missing evaluator route: ${route}`);
+    assert.match(backendMain.slice(start, start + 350), /require_roles\("EVALUATOR"\)/);
+  }
 });
