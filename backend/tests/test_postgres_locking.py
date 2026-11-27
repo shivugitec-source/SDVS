@@ -815,3 +815,139 @@ class PostgresOtpLockingTests(unittest.TestCase):
                     synchronize_session=False
                 )
                 db.commit()
+
+    def test_saved_mark_read_holds_evaluation_row_lock_until_response_prepared(self):
+        suffix = uuid.uuid4().hex
+        with self.SessionLocal() as db:
+            institution = Institution(
+                name="SDVS saved-mark read lock test",
+                code=f"MARKREAD-{suffix[:20]}",
+            )
+            db.add(institution)
+            db.flush()
+            evaluator = User(
+                institution_id=institution.id,
+                username=f"saved-mark-read-lock-{suffix}",
+                password_hash="not-a-real-password",
+                role=Role.EVALUATOR,
+            )
+            examination = Examination(
+                institution_id=institution.id,
+                name="Saved-mark read lock test",
+                academic_year="2026-27",
+            )
+            db.add_all([evaluator, examination])
+            db.flush()
+            subject = Subject(
+                examination_id=examination.id,
+                code=f"MR-{suffix[:8]}",
+                name="Saved-mark read lock subject",
+                max_marks=10,
+            )
+            db.add(subject)
+            db.flush()
+            question = Question(
+                subject_id=subject.id,
+                question_number="1",
+                max_marks=10,
+                rubric="Fictional saved-mark rubric",
+            )
+            script = EvaluationScript(
+                institution_id=institution.id,
+                subject_id=subject.id,
+                anonymous_code=f"SDVS-MR-{suffix[:12]}",
+                object_key="unused-saved-mark-read-lock-test.pdf",
+                pdf_sha256="0" * 64,
+                page_count=1,
+            )
+            db.add_all([question, script])
+            db.flush()
+            allocation = Allocation(
+                script_id=script.id,
+                evaluator_id=evaluator.id,
+                active=True,
+            )
+            evaluation = Evaluation(
+                script_id=script.id,
+                evaluator_id=evaluator.id,
+                status=Status.DRAFT,
+            )
+            db.add_all([allocation, evaluation])
+            db.flush()
+            mark = QuestionMark(
+                evaluation_id=evaluation.id,
+                question_id=question.id,
+                marks=5,
+                remark="Fictional saved-mark remark",
+                private_note="Fictional saved-mark note",
+            )
+            db.add(mark)
+            db.commit()
+            institution_id = institution.id
+            evaluator_id = evaluator.id
+            examination_id = examination.id
+            subject_id = subject.id
+            question_id = question.id
+            script_id = script.id
+            allocation_id = allocation.id
+            evaluation_id = evaluation.id
+
+        try:
+            with self.SessionLocal() as first, self.SessionLocal() as second:
+                first.begin()
+                evaluator = first.get(User, evaluator_id)
+                response = get_evaluation(script_id, first, evaluator)
+                self.assertEqual(response["status"], Status.DRAFT.value)
+                self.assertEqual(response["marks"][0]["question_id"], question_id)
+                self.assertEqual(response["marks"][0]["marks"], "5")
+
+                second.begin()
+                second.execute(text("SET LOCAL lock_timeout = '250ms'"))
+                with self.assertRaises(OperationalError):
+                    second.execute(
+                        text("UPDATE evaluations SET total_marks = 7 WHERE id = :id"),
+                        {"id": evaluation_id},
+                    )
+                second.rollback()
+                first.commit()
+
+                second.begin()
+                second.execute(
+                    text("UPDATE evaluations SET total_marks = 7 WHERE id = :id"),
+                    {"id": evaluation_id},
+                )
+                second.commit()
+
+            with self.SessionLocal() as db:
+                self.assertEqual(float(db.get(Evaluation, evaluation_id).total_marks), 7.0)
+        finally:
+            with self.SessionLocal() as db:
+                db.query(QuestionMark).filter_by(evaluation_id=evaluation_id).delete(
+                    synchronize_session=False
+                )
+                db.query(Evaluation).filter_by(id=evaluation_id).delete(
+                    synchronize_session=False
+                )
+                db.query(Allocation).filter_by(id=allocation_id).delete(
+                    synchronize_session=False
+                )
+                db.query(EvaluationScript).filter_by(id=script_id).delete(
+                    synchronize_session=False
+                )
+                db.query(Question).filter_by(id=question_id).delete(
+                    synchronize_session=False
+                )
+                db.query(Subject).filter_by(id=subject_id).delete(
+                    synchronize_session=False
+                )
+                db.query(Examination).filter_by(id=examination_id).delete(
+                    synchronize_session=False
+                )
+                db.query(User).filter_by(id=evaluator_id).delete(
+                    synchronize_session=False
+                )
+                db.query(Institution).filter_by(id=institution_id).delete(
+                    synchronize_session=False
+                )
+                db.commit()
+

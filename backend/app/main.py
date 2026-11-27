@@ -252,7 +252,8 @@ def assigned_pdf(script_id: str, db: Session = Depends(get_db), user: User = Dep
 def get_evaluation(script_id: str, db: Session = Depends(get_db), user: User = Depends(require_roles("EVALUATOR"))):
     # Serialize saved-mark reads with allocation revocation.
     assigned_script(script_id, user, db, lock_allocation=True)
-    ev = db.scalar(select(Evaluation).where(Evaluation.script_id == script_id, Evaluation.evaluator_id == user.id))
+    # Serialize saved-mark reads with concurrent draft writes and submission.
+    ev = get_evaluation_for_update(db, user.id, script_id=script_id)
     if not ev: return {"id": None, "status": "DRAFT", "marks": []}
     marks = db.scalars(select(QuestionMark).where(QuestionMark.evaluation_id == ev.id)).all()
     return {"id": ev.id, "status": ev.status.value, "total_marks": str(ev.total_marks) if ev.total_marks is not None else None,
