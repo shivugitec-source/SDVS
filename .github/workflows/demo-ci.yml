@@ -92,5 +92,11 @@ jobs:
           assert len(pdf) > 300, "Demo PDF payload is unexpectedly small"
           print(f"Embedded demo PDF looks structurally valid ({len(pdf)} bytes).")
           PY
-      - name: Test demo workflow contracts and mark validation
+      - name: Install pinned React evaluator dependencies
+        working-directory: frontend
+        run: npm install --no-audit --no-fund
+      - name: Build React evaluator (TypeScript + Vite)
+        working-directory: frontend
+        run: npm run build
+      - name: Test demo and evaluator workflow contracts
         run: node --test tests/demo-validation.test.mjs
