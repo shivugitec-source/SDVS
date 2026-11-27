@@ -133,6 +133,16 @@ class AdminAuthorizationTests(unittest.TestCase):
     def test_admin_user_list_requires_authentication(self):
         response = self.client.get("/admin/users")
         self.assertEqual(response.status_code, 401)
+        self.assertEqual(response.headers.get("www-authenticate"), "Bearer")
+
+    def test_openapi_documents_bearer_jwt_without_password_token_endpoint(self):
+        schema = self.client.get("/openapi.json").json()
+        security_schemes = schema["components"]["securitySchemes"]
+        bearer = security_schemes["HTTPBearer"]
+        self.assertEqual(bearer["type"], "http")
+        self.assertEqual(bearer["scheme"], "bearer")
+        self.assertNotIn("flows", bearer)
+        self.assertNotIn("tokenUrl", json.dumps(security_schemes))
 
     def test_evaluator_cannot_access_master_admin_user_list(self):
         response = self.client.get(
