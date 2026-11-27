@@ -136,6 +136,62 @@ class AdminAuthorizationTests(unittest.TestCase):
         )
         self.assertEqual(response.status_code, 403)
 
+    def test_evaluator_cannot_read_unassigned_subject_rubric(self):
+        fixture = self._create_evaluation_assignment()
+        suffix = uuid.uuid4().hex
+        with self.SessionLocal() as db:
+            assigned_script = db.get(EvaluationScript, fixture["script_id"])
+            assigned_subject = db.get(Subject, assigned_script.subject_id)
+            assigned_question = db.get(Question, fixture["question_id"])
+            assigned_question.rubric = "Fictional rubric for the assigned script"
+
+            unassigned_subject = Subject(
+                examination_id=assigned_subject.examination_id,
+                code=f"UNASSIGNED-{suffix[:8]}",
+                name="Unassigned subject",
+                max_marks=10,
+            )
+            db.add(unassigned_subject)
+            db.flush()
+            unassigned_question = Question(
+                subject_id=unassigned_subject.id,
+                question_number="1",
+                max_marks=10,
+                rubric="Fictional confidential rubric for an unassigned subject",
+            )
+            db.add(unassigned_question)
+            db.commit()
+            unassigned_subject_id = unassigned_subject.id
+
+        evaluator_headers = {"Authorization": f"Bearer {self.evaluator_token}"}
+        denied = self.client.get(
+            f"/subjects/{unassigned_subject_id}/questions",
+            headers=evaluator_headers,
+        )
+        self.assertEqual(denied.status_code, 403)
+        self.assertEqual(denied.json()["detail"], "Insufficient permissions")
+
+        assigned = self.client.get(
+            f"/evaluator/scripts/{fixture['script_id']}/questions",
+            headers=evaluator_headers,
+        )
+        self.assertEqual(assigned.status_code, 200, assigned.text)
+        self.assertEqual(
+            assigned.json()[0]["rubric"],
+            "Fictional rubric for the assigned script",
+        )
+
+        administrator = self.client.get(
+            f"/subjects/{unassigned_subject_id}/questions",
+            headers={"Authorization": f"Bearer {self.master_token}"},
+        )
+        self.assertEqual(administrator.status_code, 200, administrator.text)
+        self.assertEqual(
+            administrator.json()[0]["rubric"],
+            "Fictional confidential rubric for an unassigned subject",
+        )
+
+
     def test_super_admin_list_is_scoped_to_its_institution(self):
         response = self.client.get(
             "/admin/users",
