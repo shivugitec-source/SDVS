@@ -1,7 +1,12 @@
+import hashlib
+import io
+import json
 import unittest
 import uuid
 from datetime import datetime, timedelta, timezone
 from unittest.mock import patch
+
+from pypdf import PdfWriter
 
 from fastapi.testclient import TestClient
 from fastapi import HTTPException
@@ -14,7 +19,7 @@ from sqlalchemy.pool import StaticPool
 from app.config import settings
 from app.db import Base, get_db
 from app.main import app, assigned_script, claim_otp_attempt, get_evaluation_for_update, get_otp_request_user_for_update, otp_digest
-from app.models import (Allocation, Evaluation, EvaluationScript, Examination, Institution, OTPChallenge, Question, QuestionMark, Role, Status, Subject, User, UserProfile)
+from app.models import (Allocation, AuditEvent, Candidate, Evaluation, EvaluationScript, Examination, IdentityMapping, Institution, OTPChallenge, Question, QuestionMark, Role, Status, Subject, User, UserProfile)
 from app.security import create_token
 
 
@@ -951,3 +956,101 @@ class AdminAuthorizationTests(unittest.TestCase):
                 ("evaluation", {"evaluation_id": fixture["evaluation_id"]}),
             ],
         )
+
+    def _create_upload_subject(self):
+        suffix = uuid.uuid4().hex
+        with self.SessionLocal() as db:
+            examination = Examination(
+                institution_id=self.institution_id,
+                name=f"Upload test {suffix}",
+                academic_year="2026-27",
+            )
+            db.add(examination)
+            db.flush()
+            subject = Subject(
+                examination_id=examination.id,
+                code=f"UPLOAD-{suffix[:8]}",
+                name="Upload test subject",
+                max_marks=10,
+            )
+            db.add(subject)
+            db.commit()
+            return subject.id
+
+    def test_pdf_upload_rejects_payload_over_configured_limit_before_storage(self):
+        subject_id = self._create_upload_subject()
+        oversized_pdf = b"%PDF-" + b"x" * (1024 * 1024 - 4)
+        self.assertEqual(len(oversized_pdf), 1024 * 1024 + 1)
+
+        with patch("app.main.settings.max_upload_mb", 1), patch("app.main.put_object") as put_object:
+            response = self.client.post(
+                "/scripts/upload",
+                data={
+                    "subject_id": subject_id,
+                    "candidate_name": "Fictional Oversized Candidate",
+                    "register_number": "REG-OVERSIZED-001",
+                },
+                files={"file": ("oversized.pdf", oversized_pdf, "application/pdf")},
+                headers={"Authorization": f"Bearer {self.master_token}"},
+            )
+
+        self.assertEqual(response.status_code, 413, response.text)
+        self.assertEqual(response.json()["detail"], "PDF exceeds upload limit")
+        put_object.assert_not_called()
+
+    def test_pdf_upload_keeps_candidate_identity_out_of_anonymous_response_and_audit(self):
+        subject_id = self._create_upload_subject()
+        candidate_name = "Fictional Candidate Upload Test"
+        register_number = "REG-UPLOAD-001"
+        writer = PdfWriter()
+        writer.add_blank_page(width=72, height=72)
+        source = io.BytesIO()
+        writer.write(source)
+        source_pdf = source.getvalue()
+
+        with patch("app.main.put_object") as put_object:
+            response = self.client.post(
+                "/scripts/upload",
+                data={
+                    "subject_id": subject_id,
+                    "candidate_name": candidate_name,
+                    "register_number": register_number,
+                },
+                files={"file": ("sample.pdf", source_pdf, "application/pdf")},
+                headers={"Authorization": f"Bearer {self.master_token}"},
+            )
+
+        self.assertEqual(response.status_code, 200, response.text)
+        payload = response.json()
+        self.assertEqual(set(payload), {"script_id", "anonymous_code", "page_count", "sha256"})
+        self.assertNotIn(candidate_name, json.dumps(payload))
+        self.assertNotIn(register_number, json.dumps(payload))
+        self.assertEqual(payload["page_count"], 1)
+
+        put_object.assert_called_once()
+        object_key, stored_pdf = put_object.call_args.args
+        self.assertEqual(object_key, f"{payload['anonymous_code']}.pdf")
+        self.assertTrue(stored_pdf.startswith(b"%PDF-"))
+        expected_digest = hashlib.sha256(stored_pdf).hexdigest()
+        self.assertEqual(payload["sha256"], expected_digest)
+
+        with self.SessionLocal() as db:
+            script = db.get(EvaluationScript, payload["script_id"])
+            self.assertEqual(script.anonymous_code, payload["anonymous_code"])
+            self.assertEqual(script.pdf_sha256, expected_digest)
+            mapping = db.query(IdentityMapping).filter_by(script_id=script.id).one()
+            candidate = db.get(Candidate, mapping.candidate_id)
+            self.assertEqual(candidate.full_name, candidate_name)
+            self.assertEqual(candidate.register_number, register_number)
+            audit_event = db.query(AuditEvent).filter_by(
+                action="SCRIPT_UPLOADED",
+                entity_id=script.id,
+            ).one()
+            audit_detail = json.loads(audit_event.detail)
+            self.assertEqual(
+                audit_detail,
+                {"anonymous_code": payload["anonymous_code"], "sha256": expected_digest},
+            )
+            self.assertNotIn(candidate_name, audit_event.detail)
+            self.assertNotIn(register_number, audit_event.detail)
+
