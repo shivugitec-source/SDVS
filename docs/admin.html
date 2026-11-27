@@ -8,7 +8,7 @@
 <div id="globalStatus"></div><div class="small" style="margin-top:20px">Security note: never share OTPs. Master administrator access should be limited to trusted institutional staff.</div></main></div>
 <script>
 const $=id=>document.getElementById(id);let token=sessionStorage.getItem('sdvs_token')||'';let api=localStorage.getItem('sdvs_api')||'';$('api').value=api;
-function message(el,text,error=false){$(el).innerHTML='<div class="status '+(error?'err':'')+'">'+text+'</div>'}
+function message(el,text,error=false){const node=document.createElement('div');node.className='status'+(error?' err':'');node.textContent=String(text);$(el).replaceChildren(node)}
 function url(path){if(!api)throw Error('Set the SDVS API URL first.');return api.replace(/\/$/,'')+path}
 async function call(path,opts={}){const headers={'Content-Type':'application/json',...(token?{Authorization:'Bearer '+token}:{})};const r=await fetch(url(path),{...opts,headers:{...headers,...opts.headers}});const data=await r.json().catch(()=>({detail:'Unexpected API response'}));if(!r.ok)throw Error(typeof data.detail==='string'?data.detail:JSON.stringify(data.detail||data));return data}
 $('saveApi').onclick=()=>{api=$('api').value.trim().replace(/\/$/,'');localStorage.setItem('sdvs_api',api);message('globalStatus','API address saved.')};
