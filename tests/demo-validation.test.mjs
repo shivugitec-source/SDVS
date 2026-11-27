@@ -418,3 +418,27 @@ test("backend and demo workflows retain bounded, superseding CI execution", () =
   assert.match(backendWorkflow, /\n  validate:\n    runs-on: ubuntu-latest\n    timeout-minutes: 15\n/);
   assert.match(demoWorkflow, /\n  validate-demo:\n    runs-on: ubuntu-latest\n    timeout-minutes: 10\n/);
 });
+
+const evaluatorApp = await readFile(new URL("../frontend/src/App.tsx", import.meta.url), "utf8");
+
+test("React evaluator uses the backend's two-channel OTP authentication contract", () => {
+  assert.match(evaluatorApp, /request\(['"]\/auth\/request-otp['"]/);
+  assert.match(evaluatorApp, /request\(['"]\/auth\/verify-otp['"]/);
+  assert.match(evaluatorApp, /channel, code: otp/);
+  assert.match(evaluatorApp, /both_channels_verified/);
+  assert.match(evaluatorApp, /next_channel/);
+  assert.doesNotMatch(evaluatorApp, /request\(['"]\/auth\/login['"]/);
+  assert.doesNotMatch(evaluatorApp, /setPassword|setUsername/);
+});
+
+test("evaluator dashboard only reads evaluator-authorized script routes", () => {
+  assert.match(evaluatorApp, /request\(['"]\/evaluator\/scripts['"]/);
+  assert.doesNotMatch(evaluatorApp, /request\(['"]\/admin\/dashboard['"]/);
+  assert.match(evaluatorApp, /script\.status !== 'SUBMITTED'/);
+});
+
+test("evaluator checks PDF HTTP status and content type before displaying it", () => {
+  assert.match(evaluatorApp, /request\('\/evaluator\/scripts\/'.*'\/pdf'\)/);
+  assert.match(evaluatorApp, /if \(!pdfResponse\.headers\.get\('content-type'\)\?\.includes\('application\/pdf'\)\)/);
+  assert.match(evaluatorApp, /URL\.revokeObjectURL/);
+});
