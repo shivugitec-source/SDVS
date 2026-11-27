@@ -421,13 +421,15 @@ test("backend and demo workflows retain bounded, superseding CI execution", () =
 });
 
 const evaluatorApp = await readFile(new URL("../frontend/src/App.tsx", import.meta.url), "utf8");
+const evaluatorAuthContract = await readFile(new URL("../frontend/src/auth-contract.mjs", import.meta.url), "utf8");
 
 test("React evaluator uses the backend's two-channel OTP authentication contract", () => {
   assert.match(evaluatorApp, /request\(['"]\/auth\/request-otp['"]/);
   assert.match(evaluatorApp, /request\(['"]\/auth\/verify-otp['"]/);
   assert.match(evaluatorApp, /channel, code: otp/);
-  assert.match(evaluatorApp, /both_channels_verified/);
-  assert.match(evaluatorApp, /next_channel/);
+  assert.match(evaluatorApp, /parseOtpVerification/);
+  assert.match(evaluatorAuthContract, /result\.both_channels_verified/);
+  assert.match(evaluatorAuthContract, /result\.next_channel/);
   assert.doesNotMatch(evaluatorApp, /request\(['"]\/auth\/login['"]/);
   assert.doesNotMatch(evaluatorApp, /setPassword|setUsername/);
 });
