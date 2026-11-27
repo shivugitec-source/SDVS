@@ -899,7 +899,7 @@ class PostgresOtpLockingTests(unittest.TestCase):
                 response = get_evaluation(script_id, first, evaluator)
                 self.assertEqual(response["status"], Status.DRAFT.value)
                 self.assertEqual(response["marks"][0]["question_id"], question_id)
-                self.assertEqual(response["marks"][0]["marks"], "5")
+                self.assertEqual(response["marks"][0]["marks"], "5.00")
 
                 second.begin()
                 second.execute(text("SET LOCAL lock_timeout = '250ms'"))
