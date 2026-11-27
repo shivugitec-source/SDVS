@@ -84,7 +84,7 @@ jobs:
           from pathlib import Path
 
           source = Path("index.html").read_text(encoding="utf-8")
-          match = re.search(r'DEMO_PDF_B64\\s*=\\s*"([A-Za-z0-9+/=]+)"', source)
+          match = re.search(r'DEMO_PDF_B64\s*=\s*"([A-Za-z0-9+/=]+)"', source)
           assert match, "Embedded demo PDF base64 payload is missing"
           pdf = base64.b64decode(match.group(1), validate=True)
           assert pdf.startswith(b"%PDF-"), "Demo sample is not a PDF"
