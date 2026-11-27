@@ -1080,3 +1080,35 @@ class AdminAuthorizationTests(unittest.TestCase):
             self.assertIsNone(
                 db.query(Candidate).filter_by(register_number=register_number).first()
             )
+
+    def test_pdf_upload_rejects_encrypted_pdf_before_storage(self):
+        subject_id = self._create_upload_subject()
+        candidate_name = "Fictional Encrypted Candidate"
+        register_number = "REG-ENCRYPTED-001"
+        writer = PdfWriter()
+        writer.add_blank_page(width=72, height=72)
+        writer.encrypt(user_password="fixture-password")
+        source = io.BytesIO()
+        writer.write(source)
+        encrypted_pdf = source.getvalue()
+
+        with patch("app.main.put_object") as put_object:
+            response = self.client.post(
+                "/scripts/upload",
+                data={
+                    "subject_id": subject_id,
+                    "candidate_name": candidate_name,
+                    "register_number": register_number,
+                },
+                files={"file": ("encrypted.pdf", encrypted_pdf, "application/pdf")},
+                headers={"Authorization": f"Bearer {self.master_token}"},
+            )
+
+        self.assertEqual(response.status_code, 422, response.text)
+        self.assertEqual(response.json()["detail"], "Encrypted PDFs are not accepted")
+        put_object.assert_not_called()
+
+        with self.SessionLocal() as db:
+            self.assertIsNone(
+                db.query(Candidate).filter_by(register_number=register_number).first()
+            )
