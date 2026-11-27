@@ -1054,3 +1054,29 @@ class AdminAuthorizationTests(unittest.TestCase):
             self.assertNotIn(candidate_name, audit_event.detail)
             self.assertNotIn(register_number, audit_event.detail)
 
+    def test_pdf_upload_rejects_malformed_pdf_before_storage(self):
+        subject_id = self._create_upload_subject()
+        candidate_name = "Fictional Malformed Candidate"
+        register_number = "REG-MALFORMED-001"
+        malformed_pdf = b"%PDF-1.7\\nthis is not a valid PDF\\n%%EOF"
+
+        with patch("app.main.put_object") as put_object:
+            response = self.client.post(
+                "/scripts/upload",
+                data={
+                    "subject_id": subject_id,
+                    "candidate_name": candidate_name,
+                    "register_number": register_number,
+                },
+                files={"file": ("malformed.pdf", malformed_pdf, "application/pdf")},
+                headers={"Authorization": f"Bearer {self.master_token}"},
+            )
+
+        self.assertEqual(response.status_code, 422, response.text)
+        self.assertEqual(response.json()["detail"], "PDF is invalid or unreadable")
+        put_object.assert_not_called()
+
+        with self.SessionLocal() as db:
+            self.assertIsNone(
+                db.query(Candidate).filter_by(register_number=register_number).first()
+            )
