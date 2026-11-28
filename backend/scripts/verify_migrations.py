@@ -1,5 +1,4 @@
 """Verify PostgreSQL migration head, valuation immutability, and allocation uniqueness."""
-import re
 import sys
 import uuid
 from pathlib import Path
@@ -14,7 +13,7 @@ from sqlalchemy.exc import DBAPIError, IntegrityError
 from app.db import SessionLocal, engine
 from app.models import Allocation, Evaluation, EvaluationScript, Examination, Institution
 from app.models import Question, QuestionMark, Role, Status, Subject, User
-from app.schema import _verify_postgres_triggers
+from app.schema import _verify_postgres_active_allocation_index, _verify_postgres_triggers
 
 
 def _expect_immutable_rejection(session, statement: str, params: dict[str, str]) -> None:
@@ -49,34 +48,6 @@ def _verify_disabled_trigger_fails_closed() -> None:
 
 
 
-def _verify_active_allocation_unique_index(connection) -> None:
-    row = connection.execute(
-        text(
-            """
-            SELECT i.indisunique,
-                   pg_get_indexdef(i.indexrelid) AS definition,
-                   pg_get_expr(i.indpred, i.indrelid) AS predicate
-            FROM pg_index AS i
-            JOIN pg_class AS index_class ON index_class.oid = i.indexrelid
-            JOIN pg_namespace AS namespace ON namespace.oid = index_class.relnamespace
-            WHERE namespace.nspname = current_schema()
-              AND index_class.relname = 'uq_allocations_active_script_evaluator'
-            """
-        )
-    ).mappings().one_or_none()
-    if row is None:
-        raise AssertionError("Active-allocation unique index is missing.")
-    definition = str(row["definition"]).lower()
-    predicate = re.sub(r"[\s()\"]+", "", str(row["predicate"]).lower())
-    if not row["indisunique"]:
-        raise AssertionError("Active-allocation index is not unique.")
-    if "script_id, evaluator_id" not in definition or predicate != "activeistrue":
-        raise AssertionError(
-            "Active-allocation index must uniquely cover (script_id, evaluator_id) "
-            "only where active IS TRUE."
-        )
-
-
 def _expect_unique_allocation_rejection(session, allocation: Allocation) -> None:
     try:
         with session.begin_nested():
@@ -93,7 +64,7 @@ def main() -> int:
     with engine.connect() as connection:
         revision = connection.execute(text("SELECT version_num FROM alembic_version")).scalar_one()
         _verify_postgres_triggers(connection)
-        _verify_active_allocation_unique_index(connection)
+        _verify_postgres_active_allocation_index(connection)
     alembic_config = Config(str(Path(__file__).resolve().parents[1] / "alembic.ini"))
     expected_revision = ScriptDirectory.from_config(alembic_config).get_current_head()
     if revision != expected_revision:
