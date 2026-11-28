@@ -1,5 +1,6 @@
 """Database schema readiness checks for local and PostgreSQL deployments."""
 from pathlib import Path
+import re
 
 from alembic.config import Config
 from alembic.script import ScriptDirectory
@@ -172,6 +173,44 @@ def _verify_postgres_triggers(connection) -> None:
         )
 
 
+def _verify_postgres_active_allocation_index(connection) -> None:
+    """Fail closed unless only one active row exists per script/evaluator pair."""
+    row = connection.execute(
+        text(
+            """
+            SELECT i.indisunique,
+                   pg_get_indexdef(i.indexrelid) AS definition,
+                   pg_get_expr(i.indpred, i.indrelid) AS predicate
+            FROM pg_index AS i
+            JOIN pg_class AS index_class ON index_class.oid = i.indexrelid
+            JOIN pg_namespace AS namespace ON namespace.oid = index_class.relnamespace
+            WHERE namespace.nspname = current_schema()
+              AND index_class.relname = 'uq_allocations_active_script_evaluator'
+            """
+        )
+    ).mappings().one_or_none()
+
+    problems = []
+    if row is None:
+        problems.append("uq_allocations_active_script_evaluator is missing")
+    else:
+        definition = str(row["definition"]).lower()
+        predicate = re.sub(r"[\\s()\\\"]+", "", str(row["predicate"]).lower())
+        if not row["indisunique"]:
+            problems.append("active-allocation index is not unique")
+        if "script_id, evaluator_id" not in definition:
+            problems.append("active-allocation index does not cover script_id and evaluator_id")
+        if predicate != "activeistrue":
+            problems.append("active-allocation index predicate is not active IS TRUE")
+
+    if problems:
+        raise RuntimeError(
+            "PostgreSQL active-allocation uniqueness verification failed: "
+            + "; ".join(problems)
+            + ". Run 'alembic upgrade head' before starting SDVS."
+        )
+
+
 def ensure_schema() -> None:
     """Create only local SQLite schema; require current Alembic and restricted role on PostgreSQL."""
     if engine.dialect.name == "sqlite":
@@ -201,3 +240,4 @@ def ensure_schema() -> None:
             )
         _verify_postgres_runtime_role(connection)
         _verify_postgres_triggers(connection)
+        _verify_postgres_active_allocation_index(connection)
