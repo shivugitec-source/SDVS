@@ -5,6 +5,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from alembic.config import Config
+from alembic.script import ScriptDirectory
 from sqlalchemy import text
 from sqlalchemy.exc import DBAPIError
 
@@ -51,8 +53,12 @@ def main() -> int:
     with engine.connect() as connection:
         revision = connection.execute(text("SELECT version_num FROM alembic_version")).scalar_one()
         _verify_postgres_triggers(connection)
-    if revision != "0002_immutability":
-        raise AssertionError(f"Unexpected migration revision: {revision!r}")
+    alembic_config = Config(str(Path(__file__).resolve().parents[1] / "alembic.ini"))
+    expected_revision = ScriptDirectory.from_config(alembic_config).get_current_head()
+    if revision != expected_revision:
+        raise AssertionError(
+            f"Unexpected migration revision: {revision!r}; expected {expected_revision!r}"
+        )
 
     _verify_disabled_trigger_fails_closed()
 

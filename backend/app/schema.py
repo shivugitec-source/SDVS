@@ -19,11 +19,106 @@ _REQUIRED_POSTGRES_TRIGGERS = {
         "sdvs_reject_submitted_eval_mutation",
         27,  # BEFORE ROW UPDATE OR DELETE
     ),
+    "trg_sdvs_protect_user_identity": (
+        "users",
+        "sdvs_reject_user_identity_mutation",
+        19,  # BEFORE ROW UPDATE
+    ),
+    "trg_sdvs_protect_profile_identity": (
+        "user_profiles",
+        "sdvs_reject_profile_identity_mutation",
+        19,  # BEFORE ROW UPDATE
+    ),
 }
 
 
+def _verify_postgres_runtime_role(connection) -> None:
+    """Fail closed unless the API uses the restricted, non-owner runtime role."""
+    role = connection.execute(
+        text(
+            """
+            SELECT
+                current_user AS role_name,
+                r.rolsuper,
+                r.rolcreatedb,
+                r.rolcreaterole,
+                r.rolinherit,
+                r.rolbypassrls,
+                has_schema_privilege(current_user, 'public', 'USAGE') AS schema_usage,
+                has_schema_privilege(current_user, 'public', 'CREATE') AS schema_create,
+                has_database_privilege(current_user, current_database(), 'CREATE') AS database_create,
+                pg_has_role(current_user, 'sdvs_migrator', 'MEMBER') AS migrator_member,
+                has_table_privilege(current_user, 'public.question_marks', 'UPDATE') AS can_update_marks,
+                has_table_privilege(current_user, 'public.users', 'UPDATE') AS can_update_users,
+                has_table_privilege(current_user, 'public.users', 'DELETE') AS can_delete_users,
+                has_table_privilege(current_user, 'public.user_profiles', 'UPDATE') AS can_update_profiles,
+                has_table_privilege(current_user, 'public.user_profiles', 'DELETE') AS can_delete_profiles,
+                has_table_privilege(current_user, 'public.alembic_version', 'SELECT') AS can_read_version,
+                has_table_privilege(current_user, 'public.alembic_version', 'INSERT') AS can_insert_version,
+                has_table_privilege(current_user, 'public.alembic_version', 'UPDATE') AS can_update_version,
+                has_table_privilege(current_user, 'public.alembic_version', 'DELETE') AS can_delete_version,
+                has_table_privilege(current_user, 'public.audit_events', 'SELECT') AS can_read_audit,
+                has_table_privilege(current_user, 'public.audit_events', 'INSERT') AS can_insert_audit,
+                has_table_privilege(current_user, 'public.audit_events', 'UPDATE') AS can_update_audit,
+                has_table_privilege(current_user, 'public.audit_events', 'DELETE') AS can_delete_audit,
+                has_table_privilege(current_user, 'public.question_marks', 'TRUNCATE') AS can_truncate_marks,
+                has_table_privilege(current_user, 'public.question_marks', 'TRIGGER') AS can_manage_mark_triggers,
+                (
+                    SELECT count(*) FROM pg_tables
+                    WHERE schemaname = 'public' AND tableowner = current_user
+                ) AS owned_table_count
+            FROM pg_roles AS r
+            WHERE r.rolname = current_user
+            """
+        )
+    ).mappings().one()
+
+    problems = []
+    if role["role_name"] != "sdvs_app":
+        problems.append(f"API database role is {role['role_name']!r}, not 'sdvs_app'")
+    for flag in ("rolsuper", "rolcreatedb", "rolcreaterole", "rolinherit", "rolbypassrls"):
+        if role[flag]:
+            problems.append(f"runtime role has forbidden PostgreSQL attribute {flag}")
+    if not role["schema_usage"]:
+        problems.append("runtime role lacks USAGE on schema public")
+    if role["schema_create"]:
+        problems.append("runtime role can CREATE objects in schema public")
+    if role["database_create"]:
+        problems.append("runtime role can CREATE schemas in the database")
+    if role["migrator_member"]:
+        problems.append("runtime role is a member of sdvs_migrator")
+    if not role["can_update_marks"] or not role["can_update_users"] or not role["can_update_profiles"]:
+        problems.append("runtime role lacks required row-lock/DML UPDATE privileges")
+    if role["can_delete_users"] or role["can_delete_profiles"]:
+        problems.append("runtime role must not delete users or user profiles")
+    if (
+        not role["can_read_version"]
+        or role["can_insert_version"]
+        or role["can_update_version"]
+        or role["can_delete_version"]
+    ):
+        problems.append("runtime role must read but must not modify alembic_version")
+    if not role["can_read_audit"] or not role["can_insert_audit"]:
+        problems.append("runtime role lacks required audit SELECT/INSERT privileges")
+    if role["can_update_audit"] or role["can_delete_audit"]:
+        problems.append("runtime role must not modify or delete audit events")
+    if role["can_truncate_marks"]:
+        problems.append("runtime role must not TRUNCATE valuation marks")
+    if role["can_manage_mark_triggers"]:
+        problems.append("runtime role must not administer valuation triggers")
+    if role["owned_table_count"] != 0:
+        problems.append("runtime role owns application tables")
+
+    if problems:
+        raise RuntimeError(
+            "PostgreSQL runtime role verification failed: "
+            + "; ".join(problems)
+            + ". Provision sdvs_app/sdvs_migrator and run migrations as sdvs_migrator."
+        )
+
+
 def _verify_postgres_triggers(connection) -> None:
-    """Fail closed unless both expected immutability triggers are correctly enabled."""
+    """Fail closed unless expected immutability and identity-guard triggers are enabled."""
     rows = connection.execute(
         text(
             """
@@ -44,7 +139,9 @@ def _verify_postgres_triggers(connection) -> None:
               AND n.nspname = current_schema()
               AND t.tgname IN (
                   'trg_sdvs_immutable_marks',
-                  'trg_sdvs_immutable_evaluation'
+                  'trg_sdvs_immutable_evaluation',
+                  'trg_sdvs_protect_user_identity',
+                  'trg_sdvs_protect_profile_identity'
               )
             """
         )
@@ -69,14 +166,14 @@ def _verify_postgres_triggers(connection) -> None:
 
     if problems:
         raise RuntimeError(
-            "PostgreSQL immutability trigger verification failed: "
+            "PostgreSQL security trigger verification failed: "
             + "; ".join(problems)
             + ". Run 'alembic upgrade head' and verify database trigger configuration."
         )
 
 
 def ensure_schema() -> None:
-    """Create only local SQLite schema; require current Alembic on PostgreSQL."""
+    """Create only local SQLite schema; require current Alembic and restricted role on PostgreSQL."""
     if engine.dialect.name == "sqlite":
         Base.metadata.create_all(bind=engine)
         return
@@ -102,4 +199,5 @@ def ensure_schema() -> None:
                 f"Database migration revision is {current_revision!r}; expected "
                 f"{expected_revision!r}. Run 'alembic upgrade head' before starting SDVS."
             )
+        _verify_postgres_runtime_role(connection)
         _verify_postgres_triggers(connection)
