@@ -7,8 +7,8 @@ from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import sessionmaker
 
 from app.db import Base
-from app.main import assigned_pdf, assigned_questions, assigned_script, get_evaluation, get_evaluation_for_update, get_otp_request_user_for_update, my_scripts
-from app.models import Allocation, Evaluation, EvaluationScript, Examination, Institution, Question, QuestionMark, Role, Status, Subject, User
+from app.main import assigned_pdf, assigned_questions, assigned_script, get_evaluation, get_evaluation_for_update, get_otp_request_user_for_update, my_scripts, revoke_allocation
+from app.models import Allocation, AuditEvent, Evaluation, EvaluationScript, Examination, Institution, Question, QuestionMark, Role, Status, Subject, User
 
 
 class PostgresOtpLockingTests(unittest.TestCase):
@@ -946,6 +946,168 @@ class PostgresOtpLockingTests(unittest.TestCase):
                 db.query(User).filter_by(id=evaluator_id).delete(
                     synchronize_session=False
                 )
+                db.query(Institution).filter_by(id=institution_id).delete(
+                    synchronize_session=False
+                )
+                db.commit()
+
+    def test_allocation_revocation_waits_for_inflight_evaluator_operation(self):
+        from concurrent.futures import ThreadPoolExecutor
+        from threading import Event
+        import time
+
+        suffix = uuid.uuid4().hex
+        with self.SessionLocal() as db:
+            institution = Institution(
+                name="SDVS allocation revocation concurrency test",
+                code=f"ALREVOKE-{suffix[:20]}",
+            )
+            db.add(institution)
+            db.flush()
+            evaluator = User(
+                institution_id=institution.id,
+                username=f"allocation-revoke-evaluator-{suffix}",
+                password_hash="not-a-real-password",
+                role=Role.EVALUATOR,
+            )
+            controller = User(
+                institution_id=institution.id,
+                username=f"allocation-revoke-controller-{suffix}",
+                password_hash="not-a-real-password",
+                role=Role.EXAM_CONTROLLER,
+            )
+            examination = Examination(
+                institution_id=institution.id,
+                name="Allocation revocation concurrency test",
+                academic_year="2026-27",
+            )
+            db.add_all([evaluator, controller, examination])
+            db.flush()
+            subject = Subject(
+                examination_id=examination.id,
+                code=f"ALREV-{suffix[:8]}",
+                name="Allocation revocation subject",
+                max_marks=10,
+            )
+            db.add(subject)
+            db.flush()
+            script = EvaluationScript(
+                institution_id=institution.id,
+                subject_id=subject.id,
+                anonymous_code=f"SDVS-ALREV-{suffix[:12]}",
+                object_key="unused-allocation-revocation-concurrency.pdf",
+                pdf_sha256="0" * 64,
+                page_count=1,
+            )
+            db.add(script)
+            db.flush()
+            allocation = Allocation(
+                script_id=script.id,
+                evaluator_id=evaluator.id,
+                active=True,
+            )
+            db.add(allocation)
+            db.commit()
+            institution_id = institution.id
+            evaluator_id = evaluator.id
+            controller_id = controller.id
+            script_id = script.id
+            allocation_id = allocation.id
+
+        second_started = Event()
+
+        def revoke_in_second_transaction():
+            with self.SessionLocal() as db:
+                db.execute(text("SET application_name = 'sdvs_allocation_revoke_second'"))
+                db.execute(text("SET LOCAL lock_timeout = '10s'"))
+                actor = db.get(User, controller_id)
+                second_started.set()
+                try:
+                    return revoke_allocation(allocation_id, db, actor)
+                finally:
+                    db.execute(text("RESET application_name"))
+                    db.commit()
+
+        try:
+            with self.SessionLocal() as first:
+                first.begin()
+                evaluator = first.get(User, evaluator_id)
+                authorized = assigned_script(
+                    script_id,
+                    evaluator,
+                    first,
+                    lock_allocation=True,
+                )
+                self.assertEqual(authorized.id, script_id)
+
+                with ThreadPoolExecutor(max_workers=1, thread_name_prefix="sdvs-allocation-revoke") as pool:
+                    future = pool.submit(revoke_in_second_transaction)
+                    try:
+                        self.assertTrue(
+                            second_started.wait(timeout=5),
+                            "Revocation transaction did not start.",
+                        )
+                        deadline = time.monotonic() + 5
+                        waiting_on_allocation = False
+                        while time.monotonic() < deadline and not future.done():
+                            with self.SessionLocal() as observer:
+                                waiters = observer.scalar(
+                                    text(
+                                        "SELECT count(*) FROM pg_stat_activity "
+                                        "WHERE application_name = 'sdvs_allocation_revoke_second' "
+                                        "AND wait_event_type = 'Lock'"
+                                    )
+                                )
+                            if waiters:
+                                waiting_on_allocation = True
+                                break
+                            time.sleep(0.02)
+
+                        self.assertTrue(
+                            waiting_on_allocation,
+                            "Revocation did not wait on the evaluator's allocation row lock.",
+                        )
+                        self.assertFalse(
+                            future.done(),
+                            "Revocation completed while the evaluator still held the allocation lock.",
+                        )
+                    finally:
+                        first.commit()
+
+                    result = future.result(timeout=10)
+                    self.assertEqual(result["revoked_count"], 1)
+                    self.assertTrue(result["revoked"])
+
+            with self.SessionLocal() as db:
+                self.assertFalse(db.get(Allocation, allocation_id).active)
+                self.assertEqual(
+                    db.query(AuditEvent).filter_by(
+                        actor_id=controller_id,
+                        action="SCRIPT_ALLOCATION_REVOKED",
+                        entity_id=allocation_id,
+                    ).count(),
+                    1,
+                )
+        finally:
+            with self.SessionLocal() as db:
+                db.query(AuditEvent).filter_by(actor_id=controller_id).delete(
+                    synchronize_session=False
+                )
+                db.query(Allocation).filter_by(id=allocation_id).delete(
+                    synchronize_session=False
+                )
+                db.query(EvaluationScript).filter_by(id=script_id).delete(
+                    synchronize_session=False
+                )
+                db.query(Subject).filter_by(id=subject_id).delete(
+                    synchronize_session=False
+                )
+                db.query(Examination).filter_by(id=examination_id).delete(
+                    synchronize_session=False
+                )
+                db.query(User).filter(
+                    User.id.in_([evaluator_id, controller_id])
+                ).delete(synchronize_session=False)
                 db.query(Institution).filter_by(id=institution_id).delete(
                     synchronize_session=False
                 )
