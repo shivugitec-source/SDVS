@@ -53,7 +53,7 @@ PostgreSQL schema changes are versioned with Alembic. The initial baseline creat
 | `sdvs_migrator` | Alembic migration identity and schema owner | Non-superuser DDL on the SDVS `public` schema |
 | `sdvs_app` | FastAPI runtime identity | Required application DML; no schema DDL or trigger administration |
 
-The `provision` service executes `backend/sql/provision_roles.sql` as the bootstrap administrator. It creates or updates the two service roles, removes role memberships, transfers existing SDVS objects in the dedicated `public` schema to `sdvs_migrator`, and configures grants/default privileges. Review this script before using it against a database that contains non-SDVS objects.
+The `provision` service executes `backend/sql/provision_roles.sql` as the bootstrap administrator. It creates or updates the two service roles, removes role memberships, transfers existing SDVS objects in the dedicated `public` schema to `sdvs_migrator`, and configures grants/default privileges. Review this script before using it against a database that contains non-SDVS objects. The manual SQL companion `backend/sql/immutability_postgres.sql` now contains both valuation immutability triggers and the user/profile identity guards; Alembic remains the authoritative versioned deployment path.
 
 After every migration, `backend/migrations/env.py` grants runtime DML to `sdvs_app` and reapplies sensitive-table restrictions:
 

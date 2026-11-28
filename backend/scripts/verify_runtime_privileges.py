@@ -213,6 +213,11 @@ def main() -> int:
             )
             _expect_denied(
                 connection,
+                "UPDATE public.user_profiles SET phone = '+910000000000' WHERE user_id = :id",
+                {"id": user_id},
+            )
+            _expect_denied(
+                connection,
                 "UPDATE public.user_profiles SET full_name = 'Changed' WHERE user_id = :id",
                 {"id": user_id},
             )
