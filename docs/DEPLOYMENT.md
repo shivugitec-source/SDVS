@@ -13,7 +13,7 @@ Do not create paid or external cloud resources, deploy the API, or use real stud
 - **GitHub Pages:** publishes the offline browser prototype and static Master Admin API client from `docs/`. The offline prototype uses fictional sample data and browser-local IndexedDB.
 - **React/Vite evaluator application:** `frontend/` is type-checked and built in CI. A successful build is not a hosted deployment. Its evaluation workspace is not yet a complete end-to-end institutional workflow against the API.
 - **FastAPI API:** `backend/` contains authentication, authorization, valuation, PostgreSQL, and storage endpoints. No hosted API deployment is verified.
-- **PostgreSQL:** production schema changes use the versioned Alembic revisions `0001_initial`, `0002_immutability`, and `0003_runtime_identity_guards`.
+- **PostgreSQL:** production schema changes use the versioned Alembic revisions `0001_initial`, `0002_immutability`, `0003_runtime_identity_guards`, and `0004_active_alloc_unique`.
 - **Answer-script storage:** hosted deployments must use a private S3-compatible Cloudflare R2 bucket with `REQUIRE_R2=true`. Do not enable public bucket access or expose object URLs.
 
 The static Pages prototype is not connected to institutional records. Do not enter real candidate details or upload real answer scripts to it.
@@ -67,14 +67,14 @@ alembic check
 python scripts/verify_migrations.py
 ```
 
-The current head is `0003_runtime_identity_guards`. The verification script checks valuation immutability, enabled trigger definitions, and submitted-versus-draft mutation behaviour.
+The current head is `0004_active_alloc_unique`. The verification script checks valuation immutability, enabled trigger definitions, active-allocation uniqueness, and submitted-versus-draft mutation behaviour. Migration 0004 creates a partial unique index so each script/evaluator pair can have at most one active allocation while retaining inactive assignment history. It fails closed if duplicate active pairs already exist; it does not delete, deactivate, or rewrite any rows.
 
 ### 3. Adopt an existing pre-Alembic database safely
 
 Do not run the normal migration service against an unversioned legacy database first.
 
-1. Stop application writes and take a backup.
-2. Verify that the backup can be restored.
+1. While the current application is still available, check for duplicate active allocations using the query below. For every returned pair, use the authorized `POST /allocations/{allocation_id}/revoke` endpoint with one active allocation ID from that pair; it revokes all active historical rows for the pair. Do not delete history or resolve duplicates with unaudited SQL.
+2. Enter the maintenance window, stop new application writes, take a backup, and verify that it can be restored.
 3. Connect as `sdvs_migrator` and run the read-only parity check:
 
    ```sh
@@ -83,7 +83,20 @@ Do not run the normal migration service against an unversioned legacy database f
    python scripts/check_schema_parity.py
    ```
 
-4. Continue only if the checker reports an exact match to the `0001_initial` baseline:
+4. Continue only if the checker reports an exact match to the `0001_initial` baseline.
+5. Repeat the duplicate-active-allocation query under the write freeze:
+
+   ```sql
+   SELECT script_id, evaluator_id, COUNT(*)
+   FROM allocations
+   WHERE active IS TRUE
+   GROUP BY script_id, evaluator_id
+   HAVING COUNT(*) > 1;
+   ```
+
+   If any rows are returned, do not proceed. Reopen only the controlled administrative path needed to revoke each affected pair through the authorized endpoint, then reapply the write freeze and repeat the query. Reassign only after the migration is complete. Do not delete allocation history or resolve this by direct unaudited SQL.
+
+6. Only after schema parity and duplicate checks pass, stamp and upgrade:
 
    ```sh
    alembic stamp 0001_initial
@@ -92,6 +105,8 @@ Do not run the normal migration service against an unversioned legacy database f
    alembic check
    python scripts/verify_migrations.py
    ```
+
+Migration 0004 repeats the duplicate check inside the migration and fails closed if a duplicate appears between the operator check and upgrade. It does not change existing allocation rows.
 
 If the parity check reports any difference, stop. Do not stamp the database to hide schema drift. Prepare and review a data-preserving forward migration first.
 

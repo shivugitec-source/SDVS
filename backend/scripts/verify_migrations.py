@@ -1,4 +1,4 @@
-"""Verify PostgreSQL migration head and submitted-valuation immutability triggers."""
+"""Verify PostgreSQL migration head, valuation immutability, and allocation uniqueness."""
 import sys
 import uuid
 from pathlib import Path
@@ -8,12 +8,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from alembic.config import Config
 from alembic.script import ScriptDirectory
 from sqlalchemy import text
-from sqlalchemy.exc import DBAPIError
+from sqlalchemy.exc import DBAPIError, IntegrityError
 
 from app.db import SessionLocal, engine
-from app.models import Evaluation, EvaluationScript, Examination, Institution
+from app.models import Allocation, Evaluation, EvaluationScript, Examination, Institution
 from app.models import Question, QuestionMark, Role, Status, Subject, User
-from app.schema import _verify_postgres_triggers
+from app.schema import _verify_postgres_active_allocation_index, _verify_postgres_triggers
 
 
 def _expect_immutable_rejection(session, statement: str, params: dict[str, str]) -> None:
@@ -47,12 +47,46 @@ def _verify_disabled_trigger_fails_closed() -> None:
             )
 
 
+
+def _verify_missing_active_allocation_index_fails_closed() -> None:
+    """Prove startup rejects a database where the required unique index is absent."""
+    with engine.begin() as connection:
+        connection.execute(text("DROP INDEX uq_allocations_active_script_evaluator"))
+        try:
+            try:
+                _verify_postgres_active_allocation_index(connection)
+            except RuntimeError as exc:
+                if "uq_allocations_active_script_evaluator is missing" not in str(exc):
+                    raise
+            else:
+                raise AssertionError("Startup index guard accepted a missing active-allocation index.")
+        finally:
+            connection.execute(
+                text(
+                    "CREATE UNIQUE INDEX uq_allocations_active_script_evaluator "
+                    "ON allocations (script_id, evaluator_id) WHERE active IS TRUE"
+                )
+            )
+
+
+def _expect_unique_allocation_rejection(session, allocation: Allocation) -> None:
+    try:
+        with session.begin_nested():
+            session.add(allocation)
+            session.flush()
+    except IntegrityError:
+        return
+    raise AssertionError("The active-allocation unique index accepted a duplicate active row.")
+
+
 def main() -> int:
     if engine.dialect.name != "postgresql":
         raise RuntimeError("Migration trigger verification requires PostgreSQL.")
     with engine.connect() as connection:
         revision = connection.execute(text("SELECT version_num FROM alembic_version")).scalar_one()
         _verify_postgres_triggers(connection)
+        _verify_postgres_active_allocation_index(connection)
+    _verify_missing_active_allocation_index_fails_closed()
     alembic_config = Config(str(Path(__file__).resolve().parents[1] / "alembic.ini"))
     expected_revision = ScriptDirectory.from_config(alembic_config).get_current_head()
     if revision != expected_revision:
@@ -101,6 +135,13 @@ def main() -> int:
         )
         session.add_all([question, script])
         session.flush()
+        allocation = Allocation(
+            script_id=script.id,
+            evaluator_id=evaluator.id,
+            active=True,
+        )
+        session.add(allocation)
+        session.flush()
         evaluation = Evaluation(
             script_id=script.id,
             evaluator_id=evaluator.id,
@@ -112,6 +153,44 @@ def main() -> int:
         mark = QuestionMark(evaluation_id=evaluation.id, question_id=question.id, marks=5)
         session.add(mark)
         session.flush()
+
+        _expect_unique_allocation_rejection(
+            session,
+            Allocation(script_id=script.id, evaluator_id=evaluator.id, active=True),
+        )
+        inactive_allocations = [
+            Allocation(script_id=script.id, evaluator_id=evaluator.id, active=False),
+            Allocation(script_id=script.id, evaluator_id=evaluator.id, active=False),
+        ]
+        session.add_all(inactive_allocations)
+        session.flush()
+        try:
+            with session.begin_nested():
+                session.execute(
+                    text("UPDATE allocations SET active = TRUE WHERE id = :id"),
+                    {"id": inactive_allocations[0].id},
+                )
+        except IntegrityError:
+            pass
+        else:
+            raise AssertionError("The active-allocation unique index allowed reactivation of a duplicate.")
+        session.execute(
+            text("UPDATE allocations SET active = FALSE WHERE id = :id"),
+            {"id": allocation.id},
+        )
+        session.execute(
+            text("UPDATE allocations SET active = TRUE WHERE id = :id"),
+            {"id": inactive_allocations[0].id},
+        )
+        active_count = session.execute(
+            text(
+                "SELECT count(*) FROM allocations "
+                "WHERE script_id = :script_id AND evaluator_id = :evaluator_id AND active IS TRUE"
+            ),
+            {"script_id": script.id, "evaluator_id": evaluator.id},
+        ).scalar_one()
+        if active_count != 1:
+            raise AssertionError("Active-allocation index did not preserve exactly one active row.")
 
         _expect_immutable_rejection(session, "UPDATE question_marks SET marks = 6 WHERE id = :id", {"id": mark.id})
         _expect_immutable_rejection(session, "DELETE FROM question_marks WHERE id = :id", {"id": mark.id})
@@ -137,7 +216,7 @@ def main() -> int:
 
     print(
         "Alembic head, enabled PostgreSQL trigger definitions, disabled-trigger startup "
-        "rejection, and submitted/draft mutation behavior verified."
+        "rejection, active-allocation uniqueness, and submitted/draft mutation behavior verified."
     )
     return 0
 

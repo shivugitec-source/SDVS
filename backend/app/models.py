@@ -1,6 +1,6 @@
 import enum,uuid
 from datetime import datetime,timezone
-from sqlalchemy import String,Integer,ForeignKey,DateTime,Boolean,Numeric,Text,Enum,UniqueConstraint
+from sqlalchemy import String,Integer,ForeignKey,DateTime,Boolean,Numeric,Text,Enum,UniqueConstraint,Index,text
 from sqlalchemy.orm import Mapped,mapped_column
 from .db import Base
 def uid():return str(uuid.uuid4())
@@ -38,6 +38,14 @@ class IdentityMapping(Base):
 class Allocation(Base):
  __tablename__="allocations"
  id:Mapped[str]=mapped_column(String,primary_key=True,default=uid);script_id:Mapped[str]=mapped_column(ForeignKey("evaluation_scripts.id"),index=True);evaluator_id:Mapped[str]=mapped_column(ForeignKey("users.id"),index=True);assigned_at:Mapped[datetime]=mapped_column(DateTime(timezone=True),default=now);active:Mapped[bool]=mapped_column(Boolean,default=True)
+ __table_args__=(Index(
+  "uq_allocations_active_script_evaluator",
+  "script_id",
+  "evaluator_id",
+  unique=True,
+  postgresql_where=text("active IS TRUE"),
+  sqlite_where=text("active = 1"),
+ ),)
 class Evaluation(Base):
  __tablename__="evaluations"
  id:Mapped[str]=mapped_column(String,primary_key=True,default=uid);script_id:Mapped[str]=mapped_column(ForeignKey("evaluation_scripts.id"),index=True);evaluator_id:Mapped[str]=mapped_column(ForeignKey("users.id"),index=True);status:Mapped[Status]=mapped_column(Enum(Status),default=Status.DRAFT);version:Mapped[int]=mapped_column(Integer,default=1);submitted_at:Mapped[datetime|None]=mapped_column(DateTime(timezone=True),nullable=True);total_marks:Mapped[float|None]=mapped_column(Numeric(8,2),nullable=True);content_hash:Mapped[str|None]=mapped_column(String(64),nullable=True)
