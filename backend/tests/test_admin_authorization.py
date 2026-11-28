@@ -216,6 +216,173 @@ class AdminAuthorizationTests(unittest.TestCase):
             db.query(User).filter_by(id=payload["id"]).delete(synchronize_session=False)
             db.commit()
 
+    def test_provisioned_evaluator_completes_two_channel_otp_and_accesses_assigned_script(self):
+        suffix = str(uuid.uuid4().int % 100000000).zfill(8)
+        email = f"otp-e2e-{suffix}@example.test"
+        phone = f"+9198{suffix}"
+        evaluator_id = None
+        fixture = None
+
+        try:
+            provisioned = self.client.post(
+                "/users/evaluators",
+                json={
+                    "full_name": "Fictional OTP End-to-End Evaluator",
+                    "email": email,
+                    "phone": phone,
+                },
+                headers={"Authorization": f"Bearer {self.master_token}"},
+            )
+            self.assertEqual(provisioned.status_code, 200, provisioned.text)
+            account = provisioned.json()
+            evaluator_id = account["id"]
+            self.assertEqual(account["role"], "EVALUATOR")
+            self.assertNotIn("password", account)
+            self.assertNotIn("password_hash", account)
+
+            fixture = self._create_evaluation_assignment(evaluator_id=evaluator_id)
+            delivered = {}
+
+            with (
+                patch(
+                    "app.main.send_email_otp",
+                    side_effect=lambda destination, code: delivered.__setitem__(
+                        "email", (destination, code)
+                    ),
+                ),
+                patch(
+                    "app.main.send_sms_otp",
+                    side_effect=lambda destination, code: delivered.__setitem__(
+                        "phone", (destination, code)
+                    ),
+                ),
+                patch("app.main.secrets.randbelow", side_effect=[123456, 654321]),
+            ):
+                requested = self.client.post(
+                    "/auth/request-otp",
+                    json={"email": email},
+                )
+
+            self.assertEqual(requested.status_code, 200, requested.text)
+            self.assertEqual(
+                delivered,
+                {
+                    "email": (email, "123456"),
+                    "phone": (phone, "654321"),
+                },
+            )
+            self.assertIn("***", requested.json()["email_masked"])
+            self.assertTrue(requested.json()["phone_masked"].endswith(phone[-4:]))
+
+            email_verified = self.client.post(
+                "/auth/verify-otp",
+                json={"email": email, "channel": "email", "code": "123456"},
+            )
+            self.assertEqual(email_verified.status_code, 200, email_verified.text)
+            self.assertTrue(email_verified.json()["verified"])
+            self.assertFalse(email_verified.json()["both_channels_verified"])
+            self.assertNotIn("access_token", email_verified.json())
+
+            phone_verified = self.client.post(
+                "/auth/verify-otp",
+                json={"email": email, "channel": "phone", "code": "654321"},
+            )
+            self.assertEqual(phone_verified.status_code, 200, phone_verified.text)
+            session = phone_verified.json()
+            self.assertTrue(session["both_channels_verified"])
+            self.assertEqual(session["token_type"], "bearer")
+            self.assertEqual(session["user"]["role"], "EVALUATOR")
+            token = session["access_token"]
+            self.assertTrue(token)
+
+            evaluator_headers = {"Authorization": f"Bearer {token}"}
+            scripts = self.client.get(
+                "/evaluator/scripts",
+                headers=evaluator_headers,
+            )
+            self.assertEqual(scripts.status_code, 200, scripts.text)
+            self.assertEqual(
+                [item["script_id"] for item in scripts.json()],
+                [fixture["script_id"]],
+            )
+            self.assertNotIn(email, scripts.text)
+            self.assertNotIn(phone, scripts.text)
+
+            questions = self.client.get(
+                f"/evaluator/scripts/{fixture['script_id']}/questions",
+                headers=evaluator_headers,
+            )
+            self.assertEqual(questions.status_code, 200, questions.text)
+            self.assertEqual(len(questions.json()), 1)
+            self.assertEqual(questions.json()[0]["question_number"], "1")
+
+            evaluation = self.client.get(
+                f"/evaluator/scripts/{fixture['script_id']}/evaluation",
+                headers=evaluator_headers,
+            )
+            self.assertEqual(evaluation.status_code, 200, evaluation.text)
+            self.assertEqual(evaluation.json()["status"], "DRAFT")
+            self.assertEqual(len(evaluation.json()["marks"]), 1)
+
+            self.assertEqual(
+                self.client.get(
+                    "/admin/dashboard",
+                    headers=evaluator_headers,
+                ).status_code,
+                403,
+            )
+            self.assertEqual(
+                self.client.get(
+                    "/admin/users",
+                    headers=evaluator_headers,
+                ).status_code,
+                403,
+            )
+        finally:
+            if evaluator_id:
+                with self.SessionLocal() as db:
+                    db.query(OTPChallenge).filter_by(
+                        user_id=evaluator_id
+                    ).delete(synchronize_session=False)
+                    db.query(AuditEvent).filter_by(
+                        entity_id=evaluator_id
+                    ).delete(synchronize_session=False)
+                    if fixture:
+                        db.query(QuestionMark).filter_by(
+                            evaluation_id=fixture["evaluation_id"]
+                        ).delete(synchronize_session=False)
+                        db.query(Evaluation).filter_by(
+                            id=fixture["evaluation_id"]
+                        ).delete(synchronize_session=False)
+                        db.query(Allocation).filter_by(
+                            id=fixture["allocation_id"]
+                        ).delete(synchronize_session=False)
+                        script = db.get(EvaluationScript, fixture["script_id"])
+                        subject_id = script.subject_id if script else None
+                        db.query(EvaluationScript).filter_by(
+                            id=fixture["script_id"]
+                        ).delete(synchronize_session=False)
+                        if subject_id:
+                            subject = db.get(Subject, subject_id)
+                            examination_id = subject.examination_id if subject else None
+                            db.query(Question).filter_by(
+                                subject_id=subject_id
+                            ).delete(synchronize_session=False)
+                            db.query(Subject).filter_by(
+                                id=subject_id
+                            ).delete(synchronize_session=False)
+                            if examination_id:
+                                db.query(Examination).filter_by(
+                                    id=examination_id
+                                ).delete(synchronize_session=False)
+                    db.query(UserProfile).filter_by(
+                        user_id=evaluator_id
+                    ).delete(synchronize_session=False)
+                    db.query(User).filter_by(
+                        id=evaluator_id
+                    ).delete(synchronize_session=False)
+                    db.commit()
+
     def test_evaluator_creation_rejects_legacy_password_only_contract(self):
         response = self.client.post(
             "/users/evaluators",
@@ -781,8 +948,9 @@ class AdminAuthorizationTests(unittest.TestCase):
         self.assertEqual(replay.json()["detail"], "Request a new OTP first.")
 
 
-    def _create_evaluation_assignment(self):
+    def _create_evaluation_assignment(self, evaluator_id=None):
         suffix = uuid.uuid4().hex
+        evaluator_id = evaluator_id or self.evaluator_id
         with self.SessionLocal() as db:
             examination = Examination(
                 institution_id=self.institution_id,
@@ -818,14 +986,14 @@ class AdminAuthorizationTests(unittest.TestCase):
             db.flush()
             allocation = Allocation(
                 script_id=script.id,
-                evaluator_id=self.evaluator_id,
+                evaluator_id=evaluator_id,
                 active=True,
             )
             db.add(allocation)
             db.flush()
             evaluation = Evaluation(
                 script_id=script.id,
-                evaluator_id=self.evaluator_id,
+                evaluator_id=evaluator_id,
                 status=Status.DRAFT,
             )
             db.add(evaluation)
