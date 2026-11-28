@@ -36,6 +36,9 @@ SPEC.loader.exec_module(MIGRATION)
 
 
 class ActiveAllocationUniquenessMigrationTests(unittest.TestCase):
+    def test_revision_id_fits_alembic_version_column(self):
+        self.assertLessEqual(len(MIGRATION.revision), 32)
+
     def setUp(self):
         self.engine = create_engine("sqlite+pysqlite:///:memory:")
         self.metadata = MetaData()
