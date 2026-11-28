@@ -117,15 +117,54 @@ def list_questions(subject_id: str, db: Session = Depends(get_db), user: User = 
             for q in db.scalars(select(Question).where(Question.subject_id == subject.id)).all()]
 
 @app.post("/users/evaluators")
-def create_evaluator(username: str = Form(...), password: str = Form(...), db: Session = Depends(get_db),
+def create_evaluator(body: EvaluatorCreateIn, db: Session = Depends(get_db),
                      user: User = Depends(require_roles("SUPER_ADMIN", "EXAM_CONTROLLER"))):
-    if len(password) < 12: raise HTTPException(422, "Temporary password must contain at least 12 characters")
-    if db.scalar(select(User).where(User.institution_id == user.institution_id, User.username == username)):
-        raise HTTPException(409, "Username already exists")
-    evaluator = User(institution_id=user.institution_id, username=username,
-                     password_hash=hash_password(password), role=Role.EVALUATOR)
-    db.add(evaluator); db.flush(); audit(db, user, "EVALUATOR_CREATED", "user", evaluator.id); db.commit()
-    return {"id": evaluator.id, "username": evaluator.username, "role": evaluator.role.value}
+    """Create an evaluator with the registered contacts required by two-channel OTP."""
+    name = body.full_name.strip()
+    email = body.email.strip().lower()
+    phone = body.phone.strip()
+    if len(name) < 2:
+        raise HTTPException(422, "Enter the evaluator's full name.")
+    if not re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", email):
+        raise HTTPException(422, "Enter a valid email address.")
+    if not re.fullmatch(r"\+[1-9]\d{7,14}", phone):
+        raise HTTPException(422, "Phone must use international format, e.g. +919876543210.")
+    if db.scalar(select(User).where(
+        User.institution_id == user.institution_id, User.username == email
+    )) or db.scalar(select(UserProfile).where(
+        (UserProfile.email == email) | (UserProfile.phone == phone)
+    )):
+        raise HTTPException(409, "Email or mobile number is already registered.")
+
+    # Password hashes remain populated for the legacy non-null column, but
+    # password-only login is disabled; the account authenticates through OTP.
+    temporary = secrets.token_urlsafe(32)
+    evaluator = User(
+        institution_id=user.institution_id,
+        username=email,
+        password_hash=hash_password(temporary),
+        role=Role.EVALUATOR,
+    )
+    db.add(evaluator)
+    db.flush()
+    db.add(UserProfile(
+        user_id=evaluator.id,
+        full_name=name,
+        email=email,
+        phone=phone,
+    ))
+    audit(db, user, "EVALUATOR_CREATED", "user", evaluator.id, {
+        "email": email, "role": Role.EVALUATOR.value
+    })
+    db.commit()
+    return {
+        "id": evaluator.id,
+        "name": name,
+        "email": email,
+        "phone": phone,
+        "role": evaluator.role.value,
+        "message": "Evaluator account created. The user must verify both email and mobile OTP before sign-in.",
+    }
 
 @app.post("/scripts/upload")
 async def upload_script(subject_id: str = Form(...), candidate_name: str = Form(...),

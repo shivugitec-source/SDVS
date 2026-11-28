@@ -20,3 +20,8 @@ class AdminUserCreateIn(BaseModel):
  email:str
  phone:str=Field(min_length=8,max_length=20)
  role:str="EVALUATOR"
+
+class EvaluatorCreateIn(BaseModel):
+ full_name:str=Field(min_length=2,max_length=200)
+ email:str
+ phone:str=Field(min_length=8,max_length=20)
