@@ -558,6 +558,6 @@ test("Render blueprint requires manual deployment and disables bootstrap by defa
   assert.match(renderBlueprint, /^\s*autoDeploy: false$/m);
   assert.match(renderBlueprint, /key: DEV_BOOTSTRAP\s+value: "false"/);
   assert.match(renderBlueprint, /key: DATABASE_URL\s+sync: false/);
-  assert.match(deploymentGuide, /restricted sdvs_app connection string/i);
+  assert.match(renderBlueprint, /restricted sdvs_app connection string/i);
   assert.doesNotMatch(renderBlueprint, /shivugitec@gmail\.com|Shivanand/);
 });
