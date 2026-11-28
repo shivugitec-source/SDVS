@@ -7,7 +7,7 @@ authorized allocation-revocation workflow before retrying.
 from alembic import op
 import sqlalchemy as sa
 
-revision = "0004_active_allocation_uniqueness"
+revision = "0004_active_alloc_unique"
 down_revision = "0003_runtime_identity_guards"
 branch_labels = None
 depends_on = None
