@@ -52,12 +52,18 @@ def _apply_runtime_privileges(connection) -> None:
         )
 
     statements = (
+        "REVOKE ALL ON SCHEMA public FROM sdvs_app",
+        "GRANT USAGE ON SCHEMA public TO sdvs_app",
         "REVOKE ALL ON ALL TABLES IN SCHEMA public FROM PUBLIC",
         "REVOKE ALL ON ALL SEQUENCES IN SCHEMA public FROM PUBLIC",
+        "REVOKE ALL ON ALL TABLES IN SCHEMA public FROM sdvs_app",
+        "REVOKE ALL ON ALL SEQUENCES IN SCHEMA public FROM sdvs_app",
         "GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO sdvs_app",
         "GRANT USAGE, SELECT, UPDATE ON ALL SEQUENCES IN SCHEMA public TO sdvs_app",
         "ALTER DEFAULT PRIVILEGES FOR ROLE sdvs_migrator IN SCHEMA public REVOKE ALL ON TABLES FROM PUBLIC",
         "ALTER DEFAULT PRIVILEGES FOR ROLE sdvs_migrator IN SCHEMA public REVOKE ALL ON SEQUENCES FROM PUBLIC",
+        "ALTER DEFAULT PRIVILEGES FOR ROLE sdvs_migrator IN SCHEMA public REVOKE ALL ON TABLES FROM sdvs_app",
+        "ALTER DEFAULT PRIVILEGES FOR ROLE sdvs_migrator IN SCHEMA public REVOKE ALL ON SEQUENCES FROM sdvs_app",
         "ALTER DEFAULT PRIVILEGES FOR ROLE sdvs_migrator IN SCHEMA public GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO sdvs_app",
         "ALTER DEFAULT PRIVILEGES FOR ROLE sdvs_migrator IN SCHEMA public GRANT USAGE, SELECT, UPDATE ON SEQUENCES TO sdvs_app",
     )

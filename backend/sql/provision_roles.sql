@@ -58,11 +58,13 @@ END
 $sdvs$;
 
 SELECT format('REVOKE ALL ON DATABASE %I FROM PUBLIC', current_database()) \gexec
+SELECT format('REVOKE ALL ON DATABASE %I FROM sdvs_app, sdvs_migrator', current_database()) \gexec
 SELECT format('GRANT CONNECT ON DATABASE %I TO sdvs_migrator, sdvs_app', current_database()) \gexec
 
 -- The migrator owns the application schema; the runtime can only use it.
 ALTER SCHEMA public OWNER TO sdvs_migrator;
 REVOKE ALL ON SCHEMA public FROM PUBLIC;
+REVOKE ALL ON SCHEMA public FROM sdvs_app;
 GRANT USAGE, CREATE ON SCHEMA public TO sdvs_migrator;
 GRANT USAGE ON SCHEMA public TO sdvs_app;
 
@@ -138,6 +140,8 @@ $sdvs$;
 
 REVOKE ALL ON ALL TABLES IN SCHEMA public FROM PUBLIC;
 REVOKE ALL ON ALL SEQUENCES IN SCHEMA public FROM PUBLIC;
+REVOKE ALL ON ALL TABLES IN SCHEMA public FROM sdvs_app;
+REVOKE ALL ON ALL SEQUENCES IN SCHEMA public FROM sdvs_app;
 GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO sdvs_app;
 GRANT USAGE, SELECT, UPDATE ON ALL SEQUENCES IN SCHEMA public TO sdvs_app;
 
@@ -167,6 +171,10 @@ ALTER DEFAULT PRIVILEGES FOR ROLE sdvs_migrator IN SCHEMA public
     REVOKE ALL ON TABLES FROM PUBLIC;
 ALTER DEFAULT PRIVILEGES FOR ROLE sdvs_migrator IN SCHEMA public
     REVOKE ALL ON SEQUENCES FROM PUBLIC;
+ALTER DEFAULT PRIVILEGES FOR ROLE sdvs_migrator IN SCHEMA public
+    REVOKE ALL ON TABLES FROM sdvs_app;
+ALTER DEFAULT PRIVILEGES FOR ROLE sdvs_migrator IN SCHEMA public
+    REVOKE ALL ON SEQUENCES FROM sdvs_app;
 ALTER DEFAULT PRIVILEGES FOR ROLE sdvs_migrator IN SCHEMA public
     GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO sdvs_app;
 ALTER DEFAULT PRIVILEGES FOR ROLE sdvs_migrator IN SCHEMA public

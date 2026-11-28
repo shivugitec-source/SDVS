@@ -52,6 +52,7 @@ def _verify_postgres_runtime_role(connection) -> None:
                 has_table_privilege(current_user, 'public.audit_events', 'UPDATE') AS can_update_audit,
                 has_table_privilege(current_user, 'public.audit_events', 'DELETE') AS can_delete_audit,
                 has_table_privilege(current_user, 'public.question_marks', 'TRUNCATE') AS can_truncate_marks,
+                has_table_privilege(current_user, 'public.question_marks', 'TRIGGER') AS can_manage_mark_triggers,
                 (
                     SELECT count(*) FROM pg_tables
                     WHERE schemaname = 'public' AND tableowner = current_user
@@ -94,6 +95,8 @@ def _verify_postgres_runtime_role(connection) -> None:
         problems.append("runtime role must not modify or delete audit events")
     if role["can_truncate_marks"]:
         problems.append("runtime role must not TRUNCATE valuation marks")
+    if role["can_manage_mark_triggers"]:
+        problems.append("runtime role must not administer valuation triggers")
     if role["owned_table_count"] != 0:
         problems.append("runtime role owns application tables")
 

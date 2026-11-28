@@ -60,6 +60,7 @@ def main() -> int:
                     has_table_privilege(current_user, 'public.audit_events', 'UPDATE') AS audit_update,
                     has_table_privilege(current_user, 'public.audit_events', 'DELETE') AS audit_delete,
                     has_table_privilege(current_user, 'public.question_marks', 'TRUNCATE') AS marks_truncate,
+                    has_table_privilege(current_user, 'public.question_marks', 'TRIGGER') AS marks_trigger,
                     (
                         SELECT count(*) FROM pg_tables
                         WHERE schemaname = 'public' AND tableowner = current_user
@@ -98,6 +99,7 @@ def main() -> int:
             "audit_update",
             "audit_delete",
             "marks_truncate",
+            "marks_trigger",
         )
 
         if checks["role_name"] != "sdvs_app":
