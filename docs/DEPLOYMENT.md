@@ -73,8 +73,8 @@ The current head is `0004_active_allocation_uniqueness`. The verification script
 
 Do not run the normal migration service against an unversioned legacy database first.
 
-1. Stop application writes and take a backup.
-2. Verify that the backup can be restored.
+1. While the current application is still available, check for duplicate active allocations using the query below. For every returned pair, use the authorized `POST /allocations/{allocation_id}/revoke` endpoint with one active allocation ID from that pair; it revokes all active historical rows for the pair. Do not delete history or resolve duplicates with unaudited SQL.
+2. Enter the maintenance window, stop new application writes, take a backup, and verify that it can be restored.
 3. Connect as `sdvs_migrator` and run the read-only parity check:
 
    ```sh
@@ -84,7 +84,7 @@ Do not run the normal migration service against an unversioned legacy database f
    ```
 
 4. Continue only if the checker reports an exact match to the `0001_initial` baseline.
-5. Before stamping, check for duplicate active allocations:
+5. Repeat the duplicate-active-allocation query under the write freeze:
 
    ```sql
    SELECT script_id, evaluator_id, COUNT(*)
@@ -94,7 +94,7 @@ Do not run the normal migration service against an unversioned legacy database f
    HAVING COUNT(*) > 1;
    ```
 
-   If any rows are returned, do not proceed. While the existing application is still available, use the authorized allocation-revocation workflow for each affected script/evaluator pair; that operation revokes all active historical rows for the pair. Reassign once only after the duplicate rows are inactive. Do not delete allocation history or resolve this by direct unaudited SQL.
+   If any rows are returned, do not proceed. Reopen only the controlled administrative path needed to revoke each affected pair through the authorized endpoint, then reapply the write freeze and repeat the query. Reassign only after the migration is complete. Do not delete allocation history or resolve this by direct unaudited SQL.
 
 6. Only after schema parity and duplicate checks pass, stamp and upgrade:
 
