@@ -1184,10 +1184,16 @@ class AdminAuthorizationTests(unittest.TestCase):
         fixture = self._create_evaluation_assignment()
         headers = {"Authorization": f"Bearer {self.exam_controller_token}"}
 
-        with patch(
-            "app.main.get_allocation_for_update",
-            wraps=get_allocation_for_update,
-        ) as allocation_lock:
+        with (
+            patch(
+                "app.main.get_user_for_update",
+                wraps=get_user_for_update,
+            ) as evaluator_lock,
+            patch(
+                "app.main.get_allocations_for_update",
+                wraps=get_allocations_for_update,
+            ) as allocation_lock,
+        ):
             first = self.client.post(
                 f"/allocations/{fixture['allocation_id']}/revoke",
                 headers=headers,
@@ -1202,6 +1208,7 @@ class AdminAuthorizationTests(unittest.TestCase):
                 "revoked_count": 1,
             },
         )
+        evaluator_lock.assert_called_once()
         allocation_lock.assert_called_once()
 
         with self.SessionLocal() as db:
