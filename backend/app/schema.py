@@ -199,7 +199,7 @@ def _verify_postgres_active_allocation_index(connection) -> None:
         problems.append("uq_allocations_active_script_evaluator is missing")
     else:
         definition = str(row["definition"]).lower()
-        predicate = re.sub(r"[\\s()\\\"]+", "", str(row["predicate"]).lower())
+        predicate = re.sub(r"[\s()\"]+", "", str(row["predicate"]).lower())
         if row["table_name"] != "allocations":
             problems.append("active-allocation index is not on the allocations table")
         if not row["indisunique"]:
@@ -209,7 +209,7 @@ def _verify_postgres_active_allocation_index(connection) -> None:
         if "script_id, evaluator_id" not in definition:
             problems.append("active-allocation index does not cover script_id and evaluator_id")
         if predicate != "activeistrue":
-            problems.append("active-allocation index predicate is not active IS TRUE")
+            problems.append(f"active-allocation index predicate is {row['predicate']!r}, expected active IS TRUE")
 
     if problems:
         raise RuntimeError(
