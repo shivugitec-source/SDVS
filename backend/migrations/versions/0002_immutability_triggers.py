@@ -22,7 +22,10 @@ def upgrade() -> None:
         ) THEN
             RAISE EXCEPTION 'Submitted valuation is immutable';
         END IF;
-        RETURN COALESCE(NEW, OLD);
+        IF TG_OP = 'DELETE' THEN
+            RETURN OLD;
+        END IF;
+        RETURN NEW;
     END;
     $$ LANGUAGE plpgsql;
     """)
