@@ -1011,6 +1011,8 @@ class PostgresOtpLockingTests(unittest.TestCase):
             institution_id = institution.id
             evaluator_id = evaluator.id
             controller_id = controller.id
+            examination_id = examination.id
+            subject_id = subject.id
             script_id = script.id
             allocation_id = allocation.id
 
