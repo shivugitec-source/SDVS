@@ -42,7 +42,7 @@ ALTER ROLE sdvs_app WITH LOGIN PASSWORD :'app_password'
     NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS;
 
 -- Neither service role may inherit or SET ROLE to a bootstrap or peer role.
-DO $$
+DO $sdvs$
 DECLARE membership record;
 BEGIN
     FOR membership IN
@@ -55,7 +55,7 @@ BEGIN
         EXECUTE format('REVOKE %I FROM %I', membership.granted_role, membership.member_role);
     END LOOP;
 END
-$$;
+$sdvs$;
 
 SELECT format('REVOKE ALL ON DATABASE %I FROM PUBLIC', current_database()) \gexec
 SELECT format('GRANT CONNECT ON DATABASE %I TO sdvs_migrator, sdvs_app', current_database()) \gexec
@@ -69,7 +69,7 @@ GRANT USAGE ON SCHEMA public TO sdvs_app;
 -- Adopt existing SDVS objects in this dedicated database without changing data.
 -- The script is scoped to public; review custom objects before using it on a
 -- shared database.
-DO $$
+DO $sdvs$
 DECLARE object_record record;
 BEGIN
     FOR object_record IN
@@ -127,7 +127,7 @@ BEGIN
         );
     END LOOP;
 END
-$$;
+$sdvs$;
 
 REVOKE ALL ON ALL TABLES IN SCHEMA public FROM PUBLIC;
 REVOKE ALL ON ALL SEQUENCES IN SCHEMA public FROM PUBLIC;
@@ -136,7 +136,7 @@ GRANT USAGE, SELECT, UPDATE ON ALL SEQUENCES IN SCHEMA public TO sdvs_app;
 
 -- Keep the sensitive-table restrictions in force even when provisioning is
 -- re-run independently of the migration service.
-DO $
+DO $sdvs$
 BEGIN
     IF to_regclass('public.users') IS NOT NULL THEN
         EXECUTE 'REVOKE UPDATE, DELETE ON TABLE public.users FROM sdvs_app';
@@ -154,7 +154,7 @@ BEGIN
         EXECUTE 'GRANT SELECT ON TABLE public.alembic_version TO sdvs_app';
     END IF;
 END
-$;
+$sdvs$;
 
 ALTER DEFAULT PRIVILEGES FOR ROLE sdvs_migrator IN SCHEMA public
     REVOKE ALL ON TABLES FROM PUBLIC;

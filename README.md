@@ -71,7 +71,7 @@ Run `docker compose up --build`. Compose starts PostgreSQL, provisions the three
 
 ### Existing Compose volume
 
-If an older volume was initialized with a previous `devs` password, `POSTGRES_PASSWORD` must initially match the password already stored in PostgreSQL. Start the database, connect with `docker compose exec db psql -U devs -d devs`, rotate the password using the interactive `\\password devs` command, then update `POSTGRES_PASSWORD` in `.env` to that new value. Do not leave the old development password in place.
+If an older volume was initialized with a previous `devs` password, `POSTGRES_PASSWORD` must initially match the password already stored in PostgreSQL. Start the database, connect with `docker compose exec db psql -U devs -d devs`, rotate the password using the interactive `\password devs` command, then update `POSTGRES_PASSWORD` in `.env` to that new value. Do not leave the old development password in place.
 
 The provisioning service is idempotent and transfers ownership of existing objects in the dedicated `public` schema to `sdvs_migrator`. Take a verified backup and inspect custom objects before running it on an existing or shared database.
 
