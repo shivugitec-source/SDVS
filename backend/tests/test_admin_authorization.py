@@ -166,9 +166,9 @@ class AdminAuthorizationTests(unittest.TestCase):
         self.assertEqual(response.status_code, 403)
 
     def test_evaluator_creation_creates_otp_ready_profile_for_exam_controller(self):
-        suffix = uuid.uuid4().hex[:8]
+        suffix = str(uuid.uuid4().int % 100000000).zfill(8)
         email = f"evaluator-{suffix}@example.test"
-        phone = f"+9198{suffix[:8].ljust(8, '0')}"
+        phone = f"+9198{suffix}"
         response = self.client.post(
             "/users/evaluators",
             json={
