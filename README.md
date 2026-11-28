@@ -77,27 +77,27 @@ The provisioning service is idempotent and transfers ownership of existing objec
 
 ### Adopting a pre-Alembic PostgreSQL database
 
-Do not let the normal migration service run against an unversioned legacy database before checking parity. Stop application writes and take a verified backup first. Then:
+Do not let the normal migration service run against an unversioned legacy database before checking parity. Before the maintenance window, query duplicate active allocations while the current application is available:
 
-1. Start only PostgreSQL: `docker compose up -d db`.
-2. Provision roles and transfer schema ownership: `docker compose run --rm provision`.
-3. Run the read-only parity check as `sdvs_migrator`: `docker compose run --rm migrate python scripts/check_schema_parity.py`.
-4. Continue only if the checker reports an exact match to the `0001_initial` baseline.
-5. Before stamping, check for duplicate active assignments:
+```sql
+SELECT script_id, evaluator_id, COUNT(*)
+FROM allocations
+WHERE active IS TRUE
+GROUP BY script_id, evaluator_id
+HAVING COUNT(*) > 1;
+```
 
-   ```sql
-   SELECT script_id, evaluator_id, COUNT(*)
-   FROM allocations
-   WHERE active IS TRUE
-   GROUP BY script_id, evaluator_id
-   HAVING COUNT(*) > 1;
-   ```
+Revoke each affected script/evaluator pair through the authorized `POST /allocations/{allocation_id}/revoke` endpoint. Then:
 
-   If any pairs are returned, do not proceed. Use the authorized allocation-revocation endpoint for each affected pair; it revokes all active historical rows for that pair. Reassign once only after those rows are inactive. Do not delete allocation history or resolve duplicates through unaudited SQL.
-6. Stamp the verified initial baseline and apply all later revisions: `docker compose run --rm migrate alembic stamp 0001_initial`, then `docker compose run --rm migrate alembic upgrade head`.
+1. Stop application writes, take a verified backup, and confirm that it can be restored.
+2. Start only PostgreSQL: `docker compose up -d db`.
+3. Provision roles and transfer schema ownership: `docker compose run --rm provision`.
+4. Run the read-only parity check as `sdvs_migrator`: `docker compose run --rm migrate python scripts/check_schema_parity.py`.
+5. Continue only if the checker reports an exact match to the `0001_initial` baseline. Repeat the duplicate-active-allocation query under the write freeze; if any pair remains, stop and resolve it through the authorized revocation workflow before continuing.
+6. Run `docker compose run --rm migrate alembic stamp 0001_initial`, then apply all remaining revisions with `docker compose run --rm migrate alembic upgrade head`.
 7. Start the application: `docker compose up --build`.
 
-Migration 0004 repeats the duplicate check inside the migration and fails closed if a duplicate appears between the operator check and upgrade. It does not modify allocation rows. If the parity check reports any difference, stop. Do not stamp the database to hide drift; prepare and review a data-preserving forward migration for that schema first.
+Migration 0004 repeats the duplicate check and fails closed without modifying allocation rows. If the parity check reports any difference, stop. Do not stamp the database to hide drift; prepare and review a data-preserving forward migration for that schema first.
 
 ### Production migration procedure
 
