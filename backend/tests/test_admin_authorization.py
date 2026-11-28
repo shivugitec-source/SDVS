@@ -324,6 +324,170 @@ class AdminAuthorizationTests(unittest.TestCase):
             self.assertEqual(evaluation.json()["status"], "DRAFT")
             self.assertEqual(len(evaluation.json()["marks"]), 1)
 
+            # Exercise the complete draft lifecycle through the authenticated API.
+            # Clearing all marks must make submission fail with an explicit missing
+            # question list rather than silently submitting an incomplete valuation.
+            empty_draft = self.client.post(
+                "/evaluations",
+                json={"script_id": fixture["script_id"], "marks": []},
+                headers=evaluator_headers,
+            )
+            self.assertEqual(empty_draft.status_code, 200, empty_draft.text)
+            evaluation_id = empty_draft.json()["evaluation_id"]
+            self.assertEqual(evaluation_id, fixture["evaluation_id"])
+            self.assertEqual(float(empty_draft.json()["draft_total"]), 0.0)
+
+            incomplete_submission = self.client.post(
+                f"/evaluations/{evaluation_id}/submit",
+                headers=evaluator_headers,
+            )
+            self.assertEqual(incomplete_submission.status_code, 422)
+            self.assertEqual(
+                incomplete_submission.json()["detail"],
+                {
+                    "message": "Evaluate every question before submission",
+                    "missing": ["1"],
+                },
+            )
+
+            first_save = self.client.post(
+                "/evaluations",
+                json={
+                    "script_id": fixture["script_id"],
+                    "marks": [{
+                        "question_id": fixture["question_id"],
+                        "marks": 6,
+                        "remark": "Initial draft remark",
+                        "private_note": "Initial internal note",
+                    }],
+                },
+                headers=evaluator_headers,
+            )
+            self.assertEqual(first_save.status_code, 200, first_save.text)
+            self.assertEqual(first_save.json()["evaluation_id"], evaluation_id)
+            self.assertEqual(float(first_save.json()["draft_total"]), 6.0)
+
+            with self.SessionLocal() as db:
+                first_mark = db.query(QuestionMark).filter_by(
+                    evaluation_id=evaluation_id
+                ).one()
+                first_mark_id = first_mark.id
+
+            # Saving the same question again must update the existing row rather
+            # than insert a duplicate question mark.
+            second_save = self.client.post(
+                "/evaluations",
+                json={
+                    "script_id": fixture["script_id"],
+                    "marks": [{
+                        "question_id": fixture["question_id"],
+                        "marks": 7,
+                        "remark": "Reviewed draft remark",
+                        "private_note": "Reviewed internal note",
+                    }],
+                },
+                headers=evaluator_headers,
+            )
+            self.assertEqual(second_save.status_code, 200, second_save.text)
+            self.assertEqual(second_save.json()["evaluation_id"], evaluation_id)
+            self.assertEqual(float(second_save.json()["draft_total"]), 7.0)
+
+            with self.SessionLocal() as db:
+                updated_marks = db.query(QuestionMark).filter_by(
+                    evaluation_id=evaluation_id
+                ).all()
+                self.assertEqual(len(updated_marks), 1)
+                self.assertEqual(updated_marks[0].id, first_mark_id)
+                self.assertEqual(float(updated_marks[0].marks), 7.0)
+                self.assertEqual(updated_marks[0].remark, "Reviewed draft remark")
+                self.assertEqual(updated_marks[0].private_note, "Reviewed internal note")
+
+            invalid_save = self.client.post(
+                "/evaluations",
+                json={
+                    "script_id": fixture["script_id"],
+                    "marks": [{
+                        "question_id": fixture["question_id"],
+                        "marks": 11,
+                    }],
+                },
+                headers=evaluator_headers,
+            )
+            self.assertEqual(invalid_save.status_code, 422, invalid_save.text)
+            unchanged_draft = self.client.get(
+                f"/evaluator/scripts/{fixture['script_id']}/evaluation",
+                headers=evaluator_headers,
+            )
+            self.assertEqual(unchanged_draft.status_code, 200, unchanged_draft.text)
+            self.assertEqual(unchanged_draft.json()["status"], "DRAFT")
+            self.assertEqual(float(unchanged_draft.json()["marks"][0]["marks"]), 7.0)
+
+            submitted = self.client.post(
+                f"/evaluations/{evaluation_id}/submit",
+                headers=evaluator_headers,
+            )
+            self.assertEqual(submitted.status_code, 200, submitted.text)
+            submitted_payload = submitted.json()
+            self.assertEqual(submitted_payload["status"], "SUBMITTED")
+            self.assertEqual(float(submitted_payload["total_marks"]), 7.0)
+            self.assertRegex(
+                submitted_payload["content_sha256"],
+                r"^[0-9a-f]{64}$",
+            )
+
+            locked_save = self.client.post(
+                "/evaluations",
+                json={
+                    "script_id": fixture["script_id"],
+                    "marks": [{
+                        "question_id": fixture["question_id"],
+                        "marks": 1,
+                    }],
+                },
+                headers=evaluator_headers,
+            )
+            self.assertEqual(locked_save.status_code, 409)
+            self.assertEqual(
+                locked_save.json()["detail"],
+                "Submitted evaluation is locked",
+            )
+
+            duplicate_submission = self.client.post(
+                f"/evaluations/{evaluation_id}/submit",
+                headers=evaluator_headers,
+            )
+            self.assertEqual(duplicate_submission.status_code, 409)
+            self.assertEqual(
+                duplicate_submission.json()["detail"],
+                "Already submitted",
+            )
+
+            final_evaluation = self.client.get(
+                f"/evaluator/scripts/{fixture['script_id']}/evaluation",
+                headers=evaluator_headers,
+            )
+            self.assertEqual(final_evaluation.status_code, 200, final_evaluation.text)
+            self.assertEqual(final_evaluation.json()["status"], "SUBMITTED")
+            self.assertEqual(float(final_evaluation.json()["total_marks"]), 7.0)
+            self.assertEqual(float(final_evaluation.json()["marks"][0]["marks"]), 7.0)
+
+            with self.SessionLocal() as db:
+                persisted = db.get(Evaluation, evaluation_id)
+                persisted_mark = db.query(QuestionMark).filter_by(
+                    evaluation_id=evaluation_id
+                ).one()
+                submitted_script = db.get(EvaluationScript, fixture["script_id"])
+                self.assertEqual(persisted.status, Status.SUBMITTED)
+                self.assertIsNotNone(persisted.submitted_at)
+                self.assertEqual(
+                    persisted.content_hash,
+                    submitted_payload["content_sha256"],
+                )
+                self.assertEqual(float(persisted.total_marks), 7.0)
+                self.assertEqual(persisted_mark.id, first_mark_id)
+                self.assertEqual(float(persisted_mark.marks), 7.0)
+                self.assertEqual(submitted_script.status, "SUBMITTED")
+
             self.assertEqual(
                 self.client.get(
                     "/admin/dashboard",
@@ -348,6 +512,9 @@ class AdminAuthorizationTests(unittest.TestCase):
                         entity_id=evaluator_id
                     ).delete(synchronize_session=False)
                     if fixture:
+                        db.query(AuditEvent).filter_by(
+                            entity_id=fixture["evaluation_id"]
+                        ).delete(synchronize_session=False)
                         db.query(QuestionMark).filter_by(
                             evaluation_id=fixture["evaluation_id"]
                         ).delete(synchronize_session=False)
