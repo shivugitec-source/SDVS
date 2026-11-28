@@ -116,15 +116,22 @@ BEGIN
     END LOOP;
 
     FOR object_record IN
-        SELECT n.nspname, t.typname
+        SELECT n.nspname, t.typname, t.typtype
         FROM pg_type AS t
         JOIN pg_namespace AS n ON n.oid = t.typnamespace
         WHERE n.nspname = 'public' AND t.typtype IN ('e', 'd')
     LOOP
-        EXECUTE format(
-            'ALTER TYPE %I.%I OWNER TO sdvs_migrator',
-            object_record.nspname, object_record.typname
-        );
+        IF object_record.typtype = 'd' THEN
+            EXECUTE format(
+                'ALTER DOMAIN %I.%I OWNER TO sdvs_migrator',
+                object_record.nspname, object_record.typname
+            );
+        ELSE
+            EXECUTE format(
+                'ALTER TYPE %I.%I OWNER TO sdvs_migrator',
+                object_record.nspname, object_record.typname
+            );
+        END IF;
     END LOOP;
 END
 $sdvs$;

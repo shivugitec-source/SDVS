@@ -45,7 +45,10 @@ def _verify_postgres_runtime_role(connection) -> None:
                 has_column_privilege(current_user, 'public.users', 'role', 'UPDATE') AS can_update_user_role,
                 has_column_privilege(current_user, 'public.users', 'password_hash', 'UPDATE') AS can_update_password_hash,
                 has_column_privilege(current_user, 'public.user_profiles', 'email_verified', 'UPDATE') AS can_update_email_verified,
+                has_column_privilege(current_user, 'public.user_profiles', 'phone_verified', 'UPDATE') AS can_update_phone_verified,
                 has_column_privilege(current_user, 'public.user_profiles', 'email', 'UPDATE') AS can_update_email,
+                has_table_privilege(current_user, 'public.audit_events', 'SELECT') AS can_read_audit,
+                has_table_privilege(current_user, 'public.audit_events', 'INSERT') AS can_insert_audit,
                 has_table_privilege(current_user, 'public.audit_events', 'UPDATE') AS can_update_audit,
                 has_table_privilege(current_user, 'public.audit_events', 'DELETE') AS can_delete_audit,
                 has_table_privilege(current_user, 'public.question_marks', 'TRUNCATE') AS can_truncate_marks,
@@ -79,8 +82,14 @@ def _verify_postgres_runtime_role(connection) -> None:
         problems.append("runtime role must read but must not modify alembic_version")
     if not role["can_update_user_active"] or role["can_update_user_role"] or role["can_update_password_hash"]:
         problems.append("runtime user UPDATE privileges are not restricted to the active column")
-    if not role["can_update_email_verified"] or role["can_update_email"]:
+    if (
+        not role["can_update_email_verified"]
+        or not role["can_update_phone_verified"]
+        or role["can_update_email"]
+    ):
         problems.append("runtime profile UPDATE privileges are not restricted to verification flags")
+    if not role["can_read_audit"] or not role["can_insert_audit"]:
+        problems.append("runtime role lacks required audit SELECT/INSERT privileges")
     if role["can_update_audit"] or role["can_delete_audit"]:
         problems.append("runtime role must not modify or delete audit events")
     if role["can_truncate_marks"]:

@@ -53,6 +53,7 @@ def main() -> int:
                     has_column_privilege(current_user, 'public.users', 'role', 'UPDATE') AS user_role_update,
                     has_column_privilege(current_user, 'public.users', 'password_hash', 'UPDATE') AS password_hash_update,
                     has_column_privilege(current_user, 'public.user_profiles', 'email_verified', 'UPDATE') AS email_verified_update,
+                    has_column_privilege(current_user, 'public.user_profiles', 'phone_verified', 'UPDATE') AS phone_verified_update,
                     has_column_privilege(current_user, 'public.user_profiles', 'email', 'UPDATE') AS profile_email_update,
                     has_table_privilege(current_user, 'public.audit_events', 'SELECT') AS audit_select,
                     has_table_privilege(current_user, 'public.audit_events', 'INSERT') AS audit_insert,
@@ -77,6 +78,7 @@ def main() -> int:
             "version_select",
             "user_active_update",
             "email_verified_update",
+            "phone_verified_update",
             "audit_select",
             "audit_insert",
         )
