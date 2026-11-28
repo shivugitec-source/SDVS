@@ -48,6 +48,27 @@ def _verify_disabled_trigger_fails_closed() -> None:
 
 
 
+def _verify_missing_active_allocation_index_fails_closed() -> None:
+    """Prove startup rejects a database where the required unique index is absent."""
+    with engine.begin() as connection:
+        connection.execute(text("DROP INDEX uq_allocations_active_script_evaluator"))
+        try:
+            try:
+                _verify_postgres_active_allocation_index(connection)
+            except RuntimeError as exc:
+                if "uq_allocations_active_script_evaluator is missing" not in str(exc):
+                    raise
+            else:
+                raise AssertionError("Startup index guard accepted a missing active-allocation index.")
+        finally:
+            connection.execute(
+                text(
+                    "CREATE UNIQUE INDEX uq_allocations_active_script_evaluator "
+                    "ON allocations (script_id, evaluator_id) WHERE active IS TRUE"
+                )
+            )
+
+
 def _expect_unique_allocation_rejection(session, allocation: Allocation) -> None:
     try:
         with session.begin_nested():
@@ -65,6 +86,7 @@ def main() -> int:
         revision = connection.execute(text("SELECT version_num FROM alembic_version")).scalar_one()
         _verify_postgres_triggers(connection)
         _verify_postgres_active_allocation_index(connection)
+    _verify_missing_active_allocation_index_fails_closed()
     alembic_config = Config(str(Path(__file__).resolve().parents[1] / "alembic.ini"))
     expected_revision = ScriptDirectory.from_config(alembic_config).get_current_head()
     if revision != expected_revision:
