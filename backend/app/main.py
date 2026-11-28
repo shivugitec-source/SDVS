@@ -125,9 +125,9 @@ def create_evaluator(body: EvaluatorCreateIn, db: Session = Depends(get_db),
     phone = body.phone.strip()
     if len(name) < 2:
         raise HTTPException(422, "Enter the evaluator's full name.")
-    if not re.fullmatch(r"[^@\\s]+@[^@\\s]+\\.[^@\\s]+", email):
+    if not re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", email):
         raise HTTPException(422, "Enter a valid email address.")
-    if not re.fullmatch(r"\\+[1-9]\\d{7,14}", phone):
+    if not re.fullmatch(r"\+[1-9]\d{7,14}", phone):
         raise HTTPException(422, "Phone must use international format, e.g. +919876543210.")
     if db.scalar(select(User).where(
         User.institution_id == user.institution_id, User.username == email
