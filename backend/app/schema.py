@@ -179,10 +179,14 @@ def _verify_postgres_active_allocation_index(connection) -> None:
         text(
             """
             SELECT i.indisunique,
+                   i.indisvalid,
+                   i.indisready,
+                   table_class.relname AS table_name,
                    pg_get_indexdef(i.indexrelid) AS definition,
                    pg_get_expr(i.indpred, i.indrelid) AS predicate
             FROM pg_index AS i
             JOIN pg_class AS index_class ON index_class.oid = i.indexrelid
+            JOIN pg_class AS table_class ON table_class.oid = i.indrelid
             JOIN pg_namespace AS namespace ON namespace.oid = index_class.relnamespace
             WHERE namespace.nspname = current_schema()
               AND index_class.relname = 'uq_allocations_active_script_evaluator'
@@ -196,8 +200,12 @@ def _verify_postgres_active_allocation_index(connection) -> None:
     else:
         definition = str(row["definition"]).lower()
         predicate = re.sub(r"[\\s()\\\"]+", "", str(row["predicate"]).lower())
+        if row["table_name"] != "allocations":
+            problems.append("active-allocation index is not on the allocations table")
         if not row["indisunique"]:
             problems.append("active-allocation index is not unique")
+        if not row["indisvalid"] or not row["indisready"]:
+            problems.append("active-allocation index is not valid and ready")
         if "script_id, evaluator_id" not in definition:
             problems.append("active-allocation index does not cover script_id and evaluator_id")
         if predicate != "activeistrue":
