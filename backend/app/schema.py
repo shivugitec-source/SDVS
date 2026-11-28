@@ -9,9 +9,70 @@ from . import models as _models  # noqa: F401 - register mapped tables
 from .db import Base, engine
 
 _REQUIRED_POSTGRES_TRIGGERS = {
-    "trg_sdvs_immutable_marks",
-    "trg_sdvs_immutable_evaluation",
+    "trg_sdvs_immutable_marks": (
+        "question_marks",
+        "sdvs_reject_submitted_mark_mutation",
+        27,  # BEFORE ROW UPDATE OR DELETE
+    ),
+    "trg_sdvs_immutable_evaluation": (
+        "evaluations",
+        "sdvs_reject_submitted_eval_mutation",
+        27,  # BEFORE ROW UPDATE OR DELETE
+    ),
 }
+
+
+def _verify_postgres_triggers(connection) -> None:
+    """Fail closed unless both expected immutability triggers are correctly enabled."""
+    rows = connection.execute(
+        text(
+            """
+            SELECT
+                t.tgname,
+                c.relname AS table_name,
+                n.nspname AS table_schema,
+                p.proname AS function_name,
+                pn.nspname AS function_schema,
+                t.tgenabled,
+                t.tgtype
+            FROM pg_trigger AS t
+            JOIN pg_class AS c ON c.oid = t.tgrelid
+            JOIN pg_namespace AS n ON n.oid = c.relnamespace
+            JOIN pg_proc AS p ON p.oid = t.tgfoid
+            JOIN pg_namespace AS pn ON pn.oid = p.pronamespace
+            WHERE NOT t.tgisinternal
+              AND n.nspname = current_schema()
+              AND t.tgname IN (
+                  'trg_sdvs_immutable_marks',
+                  'trg_sdvs_immutable_evaluation'
+              )
+            """
+        )
+    ).mappings()
+    installed = {row["tgname"]: row for row in rows}
+    problems = []
+
+    for name, (expected_table, expected_function, expected_type) in _REQUIRED_POSTGRES_TRIGGERS.items():
+        trigger = installed.get(name)
+        if trigger is None:
+            problems.append(f"{name} is missing")
+            continue
+        if (
+            trigger["table_name"] != expected_table
+            or trigger["function_name"] != expected_function
+            or trigger["function_schema"] != trigger["table_schema"]
+            or trigger["tgtype"] != expected_type
+        ):
+            problems.append(f"{name} definition does not match the required table/function/events")
+        if trigger["tgenabled"] not in {"O", "A"}:
+            problems.append(f"{name} is disabled (tgenabled={trigger['tgenabled']!r})")
+
+    if problems:
+        raise RuntimeError(
+            "PostgreSQL immutability trigger verification failed: "
+            + "; ".join(problems)
+            + ". Run 'alembic upgrade head' and verify database trigger configuration."
+        )
 
 
 def ensure_schema() -> None:
@@ -35,24 +96,10 @@ def ensure_schema() -> None:
         current_revision = connection.execute(
             text("SELECT version_num FROM alembic_version")
         ).scalar_one_or_none()
-        installed_triggers = set(
-            connection.execute(
-                text(
-                    "SELECT tgname FROM pg_trigger "
-                    "WHERE NOT tgisinternal AND tgname IN "
-                    "('trg_sdvs_immutable_marks', 'trg_sdvs_immutable_evaluation')"
-                )
-            ).scalars()
-        )
 
-    if current_revision != expected_revision:
-        raise RuntimeError(
-            f"Database migration revision is {current_revision!r}; expected "
-            f"{expected_revision!r}. Run 'alembic upgrade head' before starting SDVS."
-        )
-    missing_triggers = _REQUIRED_POSTGRES_TRIGGERS - installed_triggers
-    if missing_triggers:
-        raise RuntimeError(
-            "PostgreSQL immutability triggers are missing: "
-            f"{', '.join(sorted(missing_triggers))}. Run 'alembic upgrade head'."
-        )
+        if current_revision != expected_revision:
+            raise RuntimeError(
+                f"Database migration revision is {current_revision!r}; expected "
+                f"{expected_revision!r}. Run 'alembic upgrade head' before starting SDVS."
+            )
+        _verify_postgres_triggers(connection)
