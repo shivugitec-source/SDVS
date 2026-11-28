@@ -13,7 +13,7 @@ Do not create paid or external cloud resources, deploy the API, or use real stud
 - **GitHub Pages:** publishes the offline browser prototype and static Master Admin API client from `docs/`. The offline prototype uses fictional sample data and browser-local IndexedDB.
 - **React/Vite evaluator application:** `frontend/` is type-checked and built in CI. A successful build is not a hosted deployment. Its evaluation workspace is not yet a complete end-to-end institutional workflow against the API.
 - **FastAPI API:** `backend/` contains authentication, authorization, valuation, PostgreSQL, and storage endpoints. No hosted API deployment is verified.
-- **PostgreSQL:** production schema changes use the versioned Alembic revisions `0001_initial`, `0002_immutability`, `0003_runtime_identity_guards`, and `0004_active_allocation_uniqueness`.
+- **PostgreSQL:** production schema changes use the versioned Alembic revisions `0001_initial`, `0002_immutability`, `0003_runtime_identity_guards`, and `0004_active_alloc_unique`.
 - **Answer-script storage:** hosted deployments must use a private S3-compatible Cloudflare R2 bucket with `REQUIRE_R2=true`. Do not enable public bucket access or expose object URLs.
 
 The static Pages prototype is not connected to institutional records. Do not enter real candidate details or upload real answer scripts to it.
@@ -67,7 +67,7 @@ alembic check
 python scripts/verify_migrations.py
 ```
 
-The current head is `0004_active_allocation_uniqueness`. The verification script checks valuation immutability, enabled trigger definitions, active-allocation uniqueness, and submitted-versus-draft mutation behaviour. Migration 0004 creates a partial unique index so each script/evaluator pair can have at most one active allocation while retaining inactive assignment history. It fails closed if duplicate active pairs already exist; it does not delete, deactivate, or rewrite any rows.
+The current head is `0004_active_alloc_unique`. The verification script checks valuation immutability, enabled trigger definitions, active-allocation uniqueness, and submitted-versus-draft mutation behaviour. Migration 0004 creates a partial unique index so each script/evaluator pair can have at most one active allocation while retaining inactive assignment history. It fails closed if duplicate active pairs already exist; it does not delete, deactivate, or rewrite any rows.
 
 ### 3. Adopt an existing pre-Alembic database safely
 
