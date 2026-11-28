@@ -49,8 +49,13 @@ jobs:
           provision = services["provision"]["environment"]
           assert "POSTGRES_PASSWORD" not in api
           assert "SDVS_MIGRATOR_PASSWORD" not in api
+          assert "PGPASSWORD" not in api
+          assert api["DATABASE_URL"].startswith("postgresql+psycopg://sdvs_app:")
           assert "POSTGRES_PASSWORD" not in migrate
           assert "SDVS_APP_PASSWORD" not in migrate
+          assert "PGPASSWORD" not in migrate
+          assert migrate["DATABASE_URL"].startswith("postgresql+psycopg://sdvs_migrator:")
+          assert provision["PGUSER"] == "devs"
           assert "PGPASSWORD" in provision
           assert "SDVS_MIGRATOR_PASSWORD" in provision
           assert "SDVS_APP_PASSWORD" in provision
