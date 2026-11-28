@@ -7,8 +7,12 @@ services:
     dockerfilePath: ./backend/Dockerfile
     dockerContext: ./backend
     healthCheckPath: /health
-    autoDeploy: true
+    # This template is not an approval to deploy. Keep deployments manual until
+    # the database roles, Alembic head, storage, and secrets are prepared.
+    autoDeploy: false
     envVars:
+      # Must be the restricted sdvs_app connection string after external
+      # provisioning and migrations; never use the bootstrap or migrator URL.
       - key: DATABASE_URL
         sync: false
       - key: JWT_SECRET
@@ -16,11 +20,11 @@ services:
       - key: OTP_SECRET
         generateValue: true
       - key: DEV_BOOTSTRAP
-        value: "true"
+        value: "false"
       - key: BOOTSTRAP_USERNAME
         value: admin
       - key: BOOTSTRAP_NAME
-        value: Shivanand
+        value: SDVS Master Administrator
       - key: BOOTSTRAP_PASSWORD
         sync: false
       - key: BOOTSTRAP_EMAIL
@@ -32,11 +36,11 @@ services:
       - key: SMTP_PORT
         value: "587"
       - key: SMTP_USER
-        value: shivugitec@gmail.com
+        sync: false
       - key: SMTP_PASSWORD
         sync: false
       - key: SMTP_FROM
-        value: shivugitec@gmail.com
+        sync: false
       - key: TWILIO_ACCOUNT_SID
         sync: false
       - key: TWILIO_AUTH_TOKEN
