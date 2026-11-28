@@ -136,5 +136,7 @@ jobs:
         env:
           JWT_SECRET: ci-only-secret-not-for-production
           OTP_SECRET: ci-only-otp-secret
-          DATABASE_URL: postgresql+psycopg://sdvs_app:sdvs-app-ci-only-0123456789abcdef@127.0.0.1:5432/sdvs_test
+          # These integration fixtures create/drop disposable tables and delete
+          # their own test rows. The restricted API role is verified separately above.
+          DATABASE_URL: postgresql+psycopg://sdvs_migrator:sdvs-migrator-ci-only-0123456789abcdef@127.0.0.1:5432/sdvs_test
         run: python -m unittest discover -s tests -v
