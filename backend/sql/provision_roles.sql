@@ -150,12 +150,12 @@ GRANT USAGE, SELECT, UPDATE ON ALL SEQUENCES IN SCHEMA public TO sdvs_app;
 DO $sdvs$
 BEGIN
     IF to_regclass('public.users') IS NOT NULL THEN
-        EXECUTE 'REVOKE UPDATE, DELETE ON TABLE public.users FROM sdvs_app';
-        EXECUTE 'GRANT UPDATE (active) ON TABLE public.users TO sdvs_app';
+        EXECUTE 'REVOKE DELETE ON TABLE public.users FROM sdvs_app';
+        EXECUTE 'GRANT UPDATE ON TABLE public.users TO sdvs_app';
     END IF;
     IF to_regclass('public.user_profiles') IS NOT NULL THEN
-        EXECUTE 'REVOKE UPDATE, DELETE ON TABLE public.user_profiles FROM sdvs_app';
-        EXECUTE 'GRANT UPDATE (email_verified, phone_verified) ON TABLE public.user_profiles TO sdvs_app';
+        EXECUTE 'REVOKE DELETE ON TABLE public.user_profiles FROM sdvs_app';
+        EXECUTE 'GRANT UPDATE ON TABLE public.user_profiles TO sdvs_app';
     END IF;
     IF to_regclass('public.audit_events') IS NOT NULL THEN
         EXECUTE 'REVOKE UPDATE, DELETE ON TABLE public.audit_events FROM sdvs_app';

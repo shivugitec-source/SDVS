@@ -72,13 +72,15 @@ def _apply_runtime_privileges(connection) -> None:
 
     inspector = inspect(connection)
     restrictions = {
+        # PostgreSQL SELECT ... FOR UPDATE requires table-level UPDATE. The
+        # identity-guard triggers below restrict which columns may actually change.
         "users": (
-            "REVOKE UPDATE, DELETE ON TABLE public.users FROM sdvs_app",
-            "GRANT UPDATE (active) ON TABLE public.users TO sdvs_app",
+            "REVOKE DELETE ON TABLE public.users FROM sdvs_app",
+            "GRANT UPDATE ON TABLE public.users TO sdvs_app",
         ),
         "user_profiles": (
-            "REVOKE UPDATE, DELETE ON TABLE public.user_profiles FROM sdvs_app",
-            "GRANT UPDATE (email_verified, phone_verified) ON TABLE public.user_profiles TO sdvs_app",
+            "REVOKE DELETE ON TABLE public.user_profiles FROM sdvs_app",
+            "GRANT UPDATE ON TABLE public.user_profiles TO sdvs_app",
         ),
         "audit_events": (
             "REVOKE UPDATE, DELETE ON TABLE public.audit_events FROM sdvs_app",

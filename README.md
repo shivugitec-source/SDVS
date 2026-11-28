@@ -43,7 +43,7 @@ The API container does not receive the bootstrap or migrator passwords. The migr
 
 ## Database migrations and PostgreSQL roles
 
-PostgreSQL schema changes are versioned with Alembic. The initial baseline creates the 14 current ORM tables and indexes; the next revision installs PostgreSQL triggers that reject mutation or deletion of submitted/approved evaluations and their marks.
+PostgreSQL schema changes are versioned with Alembic. The initial baseline creates the 14 current ORM tables and indexes; revision 0002 installs valuation immutability triggers, and revision 0003 installs database guards for user identity, credentials, roles, and profile contact fields.
 
 ### Separate database roles
 
@@ -57,8 +57,8 @@ The `provision` service executes `backend/sql/provision_roles.sql` as the bootst
 
 After every migration, `backend/migrations/env.py` grants runtime DML to `sdvs_app` and reapplies sensitive-table restrictions:
 
-- `sdvs_app` can update only `users.active`, not user roles or password hashes.
-- `sdvs_app` can update only `user_profiles.email_verified` and `phone_verified`, not registered email or phone values.
+- `sdvs_app` receives table-level UPDATE on `users` because PostgreSQL requires it for the API's `SELECT ... FOR UPDATE` row locks. A database trigger rejects changes to user IDs, institution, username, password hashes, or roles; only `active` may change.
+- `sdvs_app` receives table-level UPDATE on `user_profiles` for the same row-lock requirement. A database trigger rejects changes to profile IDs, names, email addresses, and phone numbers; only the email/phone verification flags may change.
 - Audit events are readable and insertable but cannot be updated or deleted by the runtime role.
 - `alembic_version` is readable by the API but cannot be modified by it.
 - The runtime role cannot create schema objects, own application tables, or disable valuation triggers.

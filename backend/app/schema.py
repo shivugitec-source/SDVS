@@ -19,6 +19,16 @@ _REQUIRED_POSTGRES_TRIGGERS = {
         "sdvs_reject_submitted_eval_mutation",
         27,  # BEFORE ROW UPDATE OR DELETE
     ),
+    "trg_sdvs_protect_user_identity": (
+        "users",
+        "sdvs_reject_user_identity_mutation",
+        19,  # BEFORE ROW UPDATE
+    ),
+    "trg_sdvs_protect_profile_identity": (
+        "user_profiles",
+        "sdvs_reject_profile_identity_mutation",
+        19,  # BEFORE ROW UPDATE
+    ),
 }
 
 
@@ -39,14 +49,14 @@ def _verify_postgres_runtime_role(connection) -> None:
                 has_database_privilege(current_user, current_database(), 'CREATE') AS database_create,
                 pg_has_role(current_user, 'sdvs_migrator', 'MEMBER') AS migrator_member,
                 has_table_privilege(current_user, 'public.question_marks', 'UPDATE') AS can_update_marks,
+                has_table_privilege(current_user, 'public.users', 'UPDATE') AS can_update_users,
+                has_table_privilege(current_user, 'public.users', 'DELETE') AS can_delete_users,
+                has_table_privilege(current_user, 'public.user_profiles', 'UPDATE') AS can_update_profiles,
+                has_table_privilege(current_user, 'public.user_profiles', 'DELETE') AS can_delete_profiles,
                 has_table_privilege(current_user, 'public.alembic_version', 'SELECT') AS can_read_version,
+                has_table_privilege(current_user, 'public.alembic_version', 'INSERT') AS can_insert_version,
                 has_table_privilege(current_user, 'public.alembic_version', 'UPDATE') AS can_update_version,
-                has_column_privilege(current_user, 'public.users', 'active', 'UPDATE') AS can_update_user_active,
-                has_column_privilege(current_user, 'public.users', 'role', 'UPDATE') AS can_update_user_role,
-                has_column_privilege(current_user, 'public.users', 'password_hash', 'UPDATE') AS can_update_password_hash,
-                has_column_privilege(current_user, 'public.user_profiles', 'email_verified', 'UPDATE') AS can_update_email_verified,
-                has_column_privilege(current_user, 'public.user_profiles', 'phone_verified', 'UPDATE') AS can_update_phone_verified,
-                has_column_privilege(current_user, 'public.user_profiles', 'email', 'UPDATE') AS can_update_email,
+                has_table_privilege(current_user, 'public.alembic_version', 'DELETE') AS can_delete_version,
                 has_table_privilege(current_user, 'public.audit_events', 'SELECT') AS can_read_audit,
                 has_table_privilege(current_user, 'public.audit_events', 'INSERT') AS can_insert_audit,
                 has_table_privilege(current_user, 'public.audit_events', 'UPDATE') AS can_update_audit,
@@ -77,18 +87,17 @@ def _verify_postgres_runtime_role(connection) -> None:
         problems.append("runtime role can CREATE schemas in the database")
     if role["migrator_member"]:
         problems.append("runtime role is a member of sdvs_migrator")
-    if not role["can_update_marks"]:
-        problems.append("runtime role lacks required question-mark UPDATE privilege")
-    if not role["can_read_version"] or role["can_update_version"]:
-        problems.append("runtime role must read but must not modify alembic_version")
-    if not role["can_update_user_active"] or role["can_update_user_role"] or role["can_update_password_hash"]:
-        problems.append("runtime user UPDATE privileges are not restricted to the active column")
+    if not role["can_update_marks"] or not role["can_update_users"] or not role["can_update_profiles"]:
+        problems.append("runtime role lacks required row-lock/DML UPDATE privileges")
+    if role["can_delete_users"] or role["can_delete_profiles"]:
+        problems.append("runtime role must not delete users or user profiles")
     if (
-        not role["can_update_email_verified"]
-        or not role["can_update_phone_verified"]
-        or role["can_update_email"]
+        not role["can_read_version"]
+        or role["can_insert_version"]
+        or role["can_update_version"]
+        or role["can_delete_version"]
     ):
-        problems.append("runtime profile UPDATE privileges are not restricted to verification flags")
+        problems.append("runtime role must read but must not modify alembic_version")
     if not role["can_read_audit"] or not role["can_insert_audit"]:
         problems.append("runtime role lacks required audit SELECT/INSERT privileges")
     if role["can_update_audit"] or role["can_delete_audit"]:
@@ -109,7 +118,7 @@ def _verify_postgres_runtime_role(connection) -> None:
 
 
 def _verify_postgres_triggers(connection) -> None:
-    """Fail closed unless both expected immutability triggers are correctly enabled."""
+    """Fail closed unless expected immutability and identity-guard triggers are enabled."""
     rows = connection.execute(
         text(
             """
@@ -130,7 +139,9 @@ def _verify_postgres_triggers(connection) -> None:
               AND n.nspname = current_schema()
               AND t.tgname IN (
                   'trg_sdvs_immutable_marks',
-                  'trg_sdvs_immutable_evaluation'
+                  'trg_sdvs_immutable_evaluation',
+                  'trg_sdvs_protect_user_identity',
+                  'trg_sdvs_protect_profile_identity'
               )
             """
         )
@@ -155,7 +166,7 @@ def _verify_postgres_triggers(connection) -> None:
 
     if problems:
         raise RuntimeError(
-            "PostgreSQL immutability trigger verification failed: "
+            "PostgreSQL security trigger verification failed: "
             + "; ".join(problems)
             + ". Run 'alembic upgrade head' and verify database trigger configuration."
         )
