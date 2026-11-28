@@ -1,4 +1,5 @@
 """Verify PostgreSQL migration head and submitted-valuation immutability triggers."""
+import re
 import sys
 import uuid
 from pathlib import Path
@@ -8,10 +9,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from alembic.config import Config
 from alembic.script import ScriptDirectory
 from sqlalchemy import text
-from sqlalchemy.exc import DBAPIError
+from sqlalchemy.exc import DBAPIError, IntegrityError
 
 from app.db import SessionLocal, engine
-from app.models import Evaluation, EvaluationScript, Examination, Institution
+from app.models import Allocation, Evaluation, EvaluationScript, Examination, Institution
 from app.models import Question, QuestionMark, Role, Status, Subject, User
 from app.schema import _verify_postgres_triggers
 
@@ -36,6 +37,7 @@ def _verify_disabled_trigger_fails_closed() -> None:
         try:
             try:
                 _verify_postgres_triggers(connection)
+        _verify_active_allocation_unique_index(connection)
             except RuntimeError as exc:
                 if "trg_sdvs_immutable_marks is disabled" not in str(exc):
                     raise
@@ -45,6 +47,45 @@ def _verify_disabled_trigger_fails_closed() -> None:
             connection.execute(
                 text("ALTER TABLE question_marks ENABLE TRIGGER trg_sdvs_immutable_marks")
             )
+
+
+
+def _verify_active_allocation_unique_index(connection) -> None:
+    row = connection.execute(
+        text(
+            """
+            SELECT i.indisunique,
+                   pg_get_indexdef(i.indexrelid) AS definition,
+                   pg_get_expr(i.indpred, i.indrelid) AS predicate
+            FROM pg_index AS i
+            JOIN pg_class AS index_class ON index_class.oid = i.indexrelid
+            JOIN pg_namespace AS namespace ON namespace.oid = index_class.relnamespace
+            WHERE namespace.nspname = current_schema()
+              AND index_class.relname = 'uq_allocations_active_script_evaluator'
+            """
+        )
+    ).mappings().one_or_none()
+    if row is None:
+        raise AssertionError("Active-allocation unique index is missing.")
+    definition = str(row["definition"]).lower()
+    predicate = re.sub(r"[\\s()\\\"]+", "", str(row["predicate"]).lower())
+    if not row["indisunique"]:
+        raise AssertionError("Active-allocation index is not unique.")
+    if "script_id, evaluator_id" not in definition or predicate != "activeistrue":
+        raise AssertionError(
+            "Active-allocation index must uniquely cover (script_id, evaluator_id) "
+            "only where active IS TRUE."
+        )
+
+
+def _expect_unique_allocation_rejection(session, allocation: Allocation) -> None:
+    try:
+        with session.begin_nested():
+            session.add(allocation)
+            session.flush()
+    except IntegrityError:
+        return
+    raise AssertionError("The active-allocation unique index accepted a duplicate active row.")
 
 
 def main() -> int:
@@ -101,6 +142,13 @@ def main() -> int:
         )
         session.add_all([question, script])
         session.flush()
+        allocation = Allocation(
+            script_id=script.id,
+            evaluator_id=evaluator.id,
+            active=True,
+        )
+        session.add(allocation)
+        session.flush()
         evaluation = Evaluation(
             script_id=script.id,
             evaluator_id=evaluator.id,
@@ -112,6 +160,44 @@ def main() -> int:
         mark = QuestionMark(evaluation_id=evaluation.id, question_id=question.id, marks=5)
         session.add(mark)
         session.flush()
+
+        _expect_unique_allocation_rejection(
+            session,
+            Allocation(script_id=script.id, evaluator_id=evaluator.id, active=True),
+        )
+        inactive_allocations = [
+            Allocation(script_id=script.id, evaluator_id=evaluator.id, active=False),
+            Allocation(script_id=script.id, evaluator_id=evaluator.id, active=False),
+        ]
+        session.add_all(inactive_allocations)
+        session.flush()
+        try:
+            with session.begin_nested():
+                session.execute(
+                    text("UPDATE allocations SET active = TRUE WHERE id = :id"),
+                    {"id": inactive_allocations[0].id},
+                )
+        except IntegrityError:
+            pass
+        else:
+            raise AssertionError("The active-allocation unique index allowed reactivation of a duplicate.")
+        session.execute(
+            text("UPDATE allocations SET active = FALSE WHERE id = :id"),
+            {"id": allocation.id},
+        )
+        session.execute(
+            text("UPDATE allocations SET active = TRUE WHERE id = :id"),
+            {"id": inactive_allocations[0].id},
+        )
+        active_count = session.execute(
+            text(
+                "SELECT count(*) FROM allocations "
+                "WHERE script_id = :script_id AND evaluator_id = :evaluator_id AND active IS TRUE"
+            ),
+            {"script_id": script.id, "evaluator_id": evaluator.id},
+        ).scalar_one()
+        if active_count != 1:
+            raise AssertionError("Active-allocation index did not preserve exactly one active row.")
 
         _expect_immutable_rejection(session, "UPDATE question_marks SET marks = 6 WHERE id = :id", {"id": mark.id})
         _expect_immutable_rejection(session, "DELETE FROM question_marks WHERE id = :id", {"id": mark.id})
@@ -137,7 +223,7 @@ def main() -> int:
 
     print(
         "Alembic head, enabled PostgreSQL trigger definitions, disabled-trigger startup "
-        "rejection, and submitted/draft mutation behavior verified."
+        "rejection, active-allocation uniqueness, and submitted/draft mutation behavior verified."
     )
     return 0
 
