@@ -205,6 +205,17 @@ class AdminAuthorizationTests(unittest.TestCase):
                 "email": email, "role": "EVALUATOR"
             })
 
+        # Keep the shared class-level fixture isolated for later authorization tests.
+        with self.SessionLocal() as db:
+            db.query(AuditEvent).filter_by(
+                action="EVALUATOR_CREATED", entity_id=payload["id"]
+            ).delete(synchronize_session=False)
+            db.query(UserProfile).filter_by(
+                user_id=payload["id"]
+            ).delete(synchronize_session=False)
+            db.query(User).filter_by(id=payload["id"]).delete(synchronize_session=False)
+            db.commit()
+
     def test_evaluator_creation_rejects_legacy_password_only_contract(self):
         response = self.client.post(
             "/users/evaluators",
