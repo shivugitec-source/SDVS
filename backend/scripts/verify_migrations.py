@@ -11,6 +11,7 @@ from sqlalchemy.exc import DBAPIError
 from app.db import SessionLocal, engine
 from app.models import Evaluation, EvaluationScript, Examination, Institution
 from app.models import Question, QuestionMark, Role, Status, Subject, User
+from app.schema import _verify_postgres_triggers
 
 
 def _expect_immutable_rejection(session, statement: str, params: dict[str, str]) -> None:
@@ -24,18 +25,36 @@ def _expect_immutable_rejection(session, statement: str, params: dict[str, str])
         raise AssertionError(f"Immutability trigger did not reject: {statement}")
 
 
+def _verify_disabled_trigger_fails_closed() -> None:
+    """Prove the startup guard rejects a present-but-disabled trigger."""
+    with engine.begin() as connection:
+        connection.execute(
+            text("ALTER TABLE question_marks DISABLE TRIGGER trg_sdvs_immutable_marks")
+        )
+        try:
+            try:
+                _verify_postgres_triggers(connection)
+            except RuntimeError as exc:
+                if "trg_sdvs_immutable_marks is disabled" not in str(exc):
+                    raise
+            else:
+                raise AssertionError("Startup trigger guard accepted a disabled immutability trigger.")
+        finally:
+            connection.execute(
+                text("ALTER TABLE question_marks ENABLE TRIGGER trg_sdvs_immutable_marks")
+            )
+
+
 def main() -> int:
     if engine.dialect.name != "postgresql":
         raise RuntimeError("Migration trigger verification requires PostgreSQL.")
     with engine.connect() as connection:
         revision = connection.execute(text("SELECT version_num FROM alembic_version")).scalar_one()
-        triggers = set(connection.execute(text(
-            "SELECT tgname FROM pg_trigger WHERE NOT tgisinternal AND tgname IN "
-            "('trg_sdvs_immutable_marks', 'trg_sdvs_immutable_evaluation')"
-        )).scalars())
-    expected = {"trg_sdvs_immutable_marks", "trg_sdvs_immutable_evaluation"}
-    if revision != "0002_immutability" or triggers != expected:
-        raise AssertionError(f"Unexpected migration state: revision={revision!r}, triggers={triggers!r}")
+        _verify_postgres_triggers(connection)
+    if revision != "0002_immutability":
+        raise AssertionError(f"Unexpected migration revision: {revision!r}")
+
+    _verify_disabled_trigger_fails_closed()
 
     session = SessionLocal()
     try:
@@ -110,7 +129,10 @@ def main() -> int:
     finally:
         session.close()
 
-    print("Alembic head, PostgreSQL triggers, and submitted/draft mutation behavior verified.")
+    print(
+        "Alembic head, enabled PostgreSQL trigger definitions, disabled-trigger startup "
+        "rejection, and submitted/draft mutation behavior verified."
+    )
     return 0
 
 
