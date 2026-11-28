@@ -43,7 +43,7 @@ The API container does not receive the bootstrap or migrator passwords. The migr
 
 ## Database migrations and PostgreSQL roles
 
-PostgreSQL schema changes are versioned with Alembic. The initial baseline creates the 14 current ORM tables and indexes; revision 0002 installs valuation immutability triggers, and revision 0003 installs database guards for user identity, credentials, roles, and profile contact fields.
+PostgreSQL schema changes are versioned with Alembic. Revision 0001 creates the initial relational schema; revision 0002 installs valuation immutability triggers; revision 0003 installs database guards for user identity, credentials, roles, and profile contact fields; revision 0004 adds a partial unique index allowing at most one active allocation per script/evaluator pair while retaining inactive history. Migration 0004 fails closed if duplicate active pairs already exist and does not rewrite allocation data.
 
 ### Separate database roles
 
@@ -53,7 +53,7 @@ PostgreSQL schema changes are versioned with Alembic. The initial baseline creat
 | `sdvs_migrator` | Alembic migration identity and schema owner | Non-superuser DDL on the SDVS `public` schema |
 | `sdvs_app` | FastAPI runtime identity | Required application DML; no schema DDL or trigger administration |
 
-The `provision` service executes `backend/sql/provision_roles.sql` as the bootstrap administrator. It creates or updates the two service roles, removes role memberships, transfers existing SDVS objects in the dedicated `public` schema to `sdvs_migrator`, and configures grants/default privileges. Review this script before using it against a database that contains non-SDVS objects. The manual SQL companion `backend/sql/immutability_postgres.sql` now contains both valuation immutability triggers and the user/profile identity guards; Alembic remains the authoritative versioned deployment path.
+The `provision` service executes `backend/sql/provision_roles.sql` as the bootstrap administrator. It creates or updates the two service roles, removes role memberships, transfers existing SDVS objects in the dedicated `public` schema to `sdvs_migrator`, and configures grants/default privileges. Review this script before using it against a database that contains non-SDVS objects. The manual SQL companion `backend/sql/immutability_postgres.sql` contains the valuation immutability triggers and user/profile identity guards; Alembic remains the authoritative versioned deployment path. The active-allocation unique index is installed by Alembic revision 0004.
 
 After every migration, `backend/migrations/env.py` grants runtime DML to `sdvs_app` and reapplies sensitive-table restrictions:
 
@@ -63,7 +63,7 @@ After every migration, `backend/migrations/env.py` grants runtime DML to `sdvs_a
 - `alembic_version` is readable by the API but cannot be modified by it.
 - The runtime role cannot create schema objects, own application tables, or disable valuation triggers.
 
-Alembic refuses to run unless connected as the non-superuser `sdvs_migrator` schema owner. PostgreSQL API startup refuses to run unless connected as the restricted `sdvs_app` role and verifies the expected grants and enabled immutability triggers.
+Alembic refuses to run unless connected as the non-superuser `sdvs_migrator` schema owner. PostgreSQL API startup refuses to run unless connected as the restricted `sdvs_app` role and verifies the expected grants, enabled immutability/identity triggers, and the active-allocation unique index.
 
 ### Fresh Compose database
 
@@ -82,23 +82,34 @@ Do not let the normal migration service run against an unversioned legacy databa
 1. Start only PostgreSQL: `docker compose up -d db`.
 2. Provision roles and transfer schema ownership: `docker compose run --rm provision`.
 3. Run the read-only parity check as `sdvs_migrator`: `docker compose run --rm migrate python scripts/check_schema_parity.py`.
-4. Continue only if the checker reports an exact match. Then run `docker compose run --rm migrate alembic stamp 0001_initial`.
-5. Apply the remaining revision: `docker compose run --rm migrate alembic upgrade head`.
-6. Start the application: `docker compose up --build`.
+4. Continue only if the checker reports an exact match to the `0001_initial` baseline.
+5. Before stamping, check for duplicate active assignments:
 
-If the parity check reports any difference, stop. Do not stamp the database to hide drift; prepare and review a data-preserving forward migration for that schema first.
+   ```sql
+   SELECT script_id, evaluator_id, COUNT(*)
+   FROM allocations
+   WHERE active IS TRUE
+   GROUP BY script_id, evaluator_id
+   HAVING COUNT(*) > 1;
+   ```
+
+   If any pairs are returned, do not proceed. Use the authorized allocation-revocation endpoint for each affected pair; it revokes all active historical rows for that pair. Reassign once only after those rows are inactive. Do not delete allocation history or resolve duplicates through unaudited SQL.
+6. Stamp the verified initial baseline and apply all later revisions: `docker compose run --rm migrate alembic stamp 0001_initial`, then `docker compose run --rm migrate alembic upgrade head`.
+7. Start the application: `docker compose up --build`.
+
+Migration 0004 repeats the duplicate check inside the migration and fails closed if a duplicate appears between the operator check and upgrade. It does not modify allocation rows. If the parity check reports any difference, stop. Do not stamp the database to hide drift; prepare and review a data-preserving forward migration for that schema first.
 
 ### Production migration procedure
 
 Provision the roles as a controlled database-administration step. Run `alembic upgrade head` with `DATABASE_URL` set to the `sdvs_migrator` connection, then run `python scripts/verify_runtime_privileges.py` with `DATABASE_URL` set to `sdvs_app`. The API must receive only the runtime connection string; never inject bootstrap or migration credentials into the API process.
 
-SQLite remains a local-development-only path and may create its schema from ORM metadata. PostgreSQL API startup does not call `Base.metadata.create_all`; it requires the current Alembic head and validates the runtime role and both immutability triggers.
+SQLite remains a local-development-only path and may create its schema from ORM metadata, including the partial active-allocation unique index. PostgreSQL API startup does not call `Base.metadata.create_all`; it requires the current Alembic head and validates the runtime role, enabled security triggers, and active-allocation unique index.
 
 The initial revision's downgrade drops SDVS tables and is destructive. CI exercises downgrade only against its disposable PostgreSQL service; do not use `alembic downgrade base` as a production rollback procedure. Production requires a separately reviewed backup/restore and forward-migration plan.
 
 ## Security and production-readiness notice
 
-This is a development MVP scaffold, not a production-certified examination system. Do not use real candidate data until institutional SSO/MFA, private encrypted object storage, upload malware scanning, migrations, database-level immutability, audit archival, privacy/retention review, security testing and disaster-recovery validation are complete.
+This is a development MVP scaffold, not a production-certified examination system. Do not use real candidate data until institutional identity and MFA review, private encrypted object storage, upload malware scanning, audit archival, privacy/retention review, security testing, production database adoption, and disaster-recovery validation are complete. Versioned migrations and database-level valuation/identity protections exist in source and CI, but have not been adopted on an institutional database.
 
 The current PDF storage adapter is local development storage. PDF metadata removal does not redact names or other identifiers visibly written on scanned pages. The sample dashboard must not be treated as live examination statistics until connected to an authorised deployment.
 
@@ -116,6 +127,10 @@ Master administrator endpoints (JWT role SUPER_ADMIN):
 - PATCH /admin/users/{user_id}/active?active=false — deactivate/reactivate a user.
 - POST /auth/request-otp — request both OTPs using {"email":"person@example.com"}.
 - POST /auth/verify-otp — verify one channel using {"email":"person@example.com","channel":"email|phone","code":"123456"}. Repeat for the other channel; token is returned only after both codes from that challenge are correct.
+
+Allocation management (SUPER_ADMIN or EXAM_CONTROLLER):
+- POST /allocations — create or return the existing active script/evaluator assignment. The database enforces at most one active row for each pair.
+- POST /allocations/{allocation_id}/revoke — revoke all active historical rows for the same script/evaluator pair after in-flight evaluator operations release their locks.
 
 ### Required deployment configuration
 - Set DEV_BOOTSTRAP=1 only for the first controlled bootstrap, and configure BOOTSTRAP_USERNAME, BOOTSTRAP_PASSWORD, BOOTSTRAP_NAME, BOOTSTRAP_EMAIL, and BOOTSTRAP_PHONE. The bootstrap account receives SUPER_ADMIN.
