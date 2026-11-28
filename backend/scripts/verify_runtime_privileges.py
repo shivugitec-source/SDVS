@@ -114,6 +114,9 @@ def main() -> int:
         if checks["owned_table_count"] != 0:
             raise AssertionError("Runtime role owns application tables.")
 
+        # End the read-only privilege-inspection transaction before the
+        # rollback-only DML/row-lock exercise below.
+        connection.commit()
         institution_id = str(uuid4())
         user_id = str(uuid4())
         profile_id = str(uuid4())
