@@ -8,8 +8,9 @@ from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 from sqlalchemy import select, func, text, update
 from pypdf import PdfReader, PdfWriter
-from .db import Base, engine, get_db, SessionLocal
+from .db import engine, get_db, SessionLocal
 from .models import *
+from .schema import ensure_schema
 from .schemas import *
 from .security import verify_password, create_token, hash_password, current_user, require_roles
 from .config import settings
@@ -29,7 +30,7 @@ def startup():
     if settings.dev_bootstrap and not all([settings.bootstrap_password, settings.bootstrap_email, settings.bootstrap_phone]):
         raise RuntimeError("DEV_BOOTSTRAP requires BOOTSTRAP_PASSWORD, BOOTSTRAP_EMAIL and BOOTSTRAP_PHONE.")
     check_storage()
-    Base.metadata.create_all(bind=engine)
+    ensure_schema()
     if settings.dev_bootstrap:
         with SessionLocal() as db:
             inst = db.scalar(select(Institution).where(Institution.code == "DEMO"))

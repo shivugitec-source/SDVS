@@ -32,6 +32,36 @@ The GitHub Pages workflow publishes only docs/. It publishes the offline dashboa
 5. API documentation: http://localhost:8000/docs.
 6. Frontend: http://localhost:5173.
 
+## Database migrations
+
+PostgreSQL schema changes are versioned with Alembic. The initial baseline creates the 14 current ORM tables and indexes; the next revision installs PostgreSQL triggers that reject mutation or deletion of submitted/approved evaluations and their marks.
+
+- Fresh local Compose databases are migrated by the one-shot \`migrate\` service before the API starts.
+- SQLite remains a local-development-only path and may create its schema from ORM metadata.
+- PostgreSQL API startup does **not** call \`Base.metadata.create_all\`. It requires the current Alembic head and verifies both immutability triggers.
+- Production deployments must run migrations as an explicit, backed-up release step (for example, \`alembic upgrade head\`) before starting the API. The API does not run migrations automatically.
+
+### Adopting a pre-Alembic PostgreSQL database
+
+Do not run the initial migration blindly against an existing database. Stop application writes and take a verified backup first.
+
+1. Run \`python scripts/check_schema_parity.py\` against the existing database. This is read-only and compares tables, columns, indexes, constraints and types with the initial baseline.
+2. Continue only if it reports an exact match. Then run \`alembic stamp 0001_initial\` to record the existing schema without recreating tables.
+3. Run \`alembic upgrade head\` to install the versioned immutability-trigger revision.
+4. Run \`alembic check\` and verify application startup.
+
+For Docker Compose, the equivalent preflight commands are:
+
+\`\`\`sh
+docker compose run --rm migrate python scripts/check_schema_parity.py
+docker compose run --rm migrate alembic stamp 0001_initial
+docker compose run --rm migrate alembic upgrade head
+\`\`\`
+
+If the parity check reports any difference, stop. Do not stamp the database to hide drift; prepare and review a data-preserving forward migration for that schema first. Existing production databases require a separately reviewed backup/restore and migration plan.
+
+The initial revision's downgrade drops the SDVS tables and is destructive. CI exercises downgrade only against its disposable PostgreSQL service; do not use \`alembic downgrade base\` as a production rollback procedure.
+
 ## Security and production-readiness notice
 
 This is a development MVP scaffold, not a production-certified examination system. Do not use real candidate data until institutional SSO/MFA, private encrypted object storage, upload malware scanning, migrations, database-level immutability, audit archival, privacy/retention review, security testing and disaster-recovery validation are complete.

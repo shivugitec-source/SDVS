@@ -9,3 +9,4 @@ python-multipart==0.0.20
 pypdf==5.3.1
 
 boto3==1.37.18
+alembic==1.15.2
