@@ -115,10 +115,18 @@ jobs:
           python scripts/verify_migrations.py
           alembic downgrade base
           python - <<'PY'
+          from sqlalchemy import MetaData
           from app import models
           from app.db import Base, engine
-          Base.metadata.create_all(bind=engine)
-          print("Legacy SQLAlchemy-created schema fixture ready.")
+          legacy_metadata = MetaData()
+          for table in Base.metadata.sorted_tables:
+              table.to_metadata(legacy_metadata)
+          legacy_allocations = legacy_metadata.tables["allocations"]
+          for index in list(legacy_allocations.indexes):
+              if index.name == "uq_allocations_active_script_evaluator":
+                  legacy_allocations.indexes.remove(index)
+          legacy_metadata.create_all(bind=engine)
+          print("Legacy 0001 schema fixture ready without the later active-allocation index.")
           PY
           python scripts/check_schema_parity.py
           alembic stamp 0001_initial
