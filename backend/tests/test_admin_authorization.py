@@ -11,7 +11,7 @@ from pypdf import PdfWriter
 from fastapi.testclient import TestClient
 from fastapi import HTTPException
 from jose import jwt
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, text
 from sqlalchemy.dialects import postgresql
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
@@ -1274,7 +1274,10 @@ class AdminAuthorizationTests(unittest.TestCase):
 
     def test_revocation_disables_all_duplicate_active_assignment_rows(self):
         fixture = self._create_evaluation_assignment()
+        # Simulate a pre-0004 legacy database: duplicates must be revocable before
+        # the migration can install the partial unique index.
         with self.SessionLocal() as db:
+            db.execute(text("DROP INDEX uq_allocations_active_script_evaluator"))
             duplicate = Allocation(
                 script_id=fixture["script_id"],
                 evaluator_id=self.evaluator_id,
@@ -1284,33 +1287,43 @@ class AdminAuthorizationTests(unittest.TestCase):
             db.commit()
             duplicate_id = duplicate.id
 
-        response = self.client.post(
-            f"/allocations/{fixture['allocation_id']}/revoke",
-            headers={"Authorization": f"Bearer {self.exam_controller_token}"},
-        )
-        self.assertEqual(response.status_code, 200, response.text)
-        self.assertEqual(response.json()["revoked_count"], 2)
-        with self.SessionLocal() as db:
-            rows = db.query(Allocation).filter_by(
-                script_id=fixture["script_id"],
-                evaluator_id=self.evaluator_id,
-            ).all()
-            self.assertEqual(len(rows), 2)
-            self.assertTrue(all(not row.active for row in rows))
-            self.assertEqual(
-                db.query(AuditEvent).filter_by(
-                    action="SCRIPT_ALLOCATION_REVOKED",
-                    entity_id=fixture["allocation_id"],
-                ).count(),
-                1,
+        try:
+            response = self.client.post(
+                f"/allocations/{fixture['allocation_id']}/revoke",
+                headers={"Authorization": f"Bearer {self.exam_controller_token}"},
             )
-            self.assertEqual(
-                db.query(AuditEvent).filter_by(
-                    action="SCRIPT_ALLOCATION_REVOKED",
-                    entity_id=duplicate_id,
-                ).count(),
-                1,
-            )
+            self.assertEqual(response.status_code, 200, response.text)
+            self.assertEqual(response.json()["revoked_count"], 2)
+            with self.SessionLocal() as db:
+                rows = db.query(Allocation).filter_by(
+                    script_id=fixture["script_id"],
+                    evaluator_id=self.evaluator_id,
+                ).all()
+                self.assertEqual(len(rows), 2)
+                self.assertTrue(all(not row.active for row in rows))
+                self.assertEqual(
+                    db.query(AuditEvent).filter_by(
+                        action="SCRIPT_ALLOCATION_REVOKED",
+                        entity_id=fixture["allocation_id"],
+                    ).count(),
+                    1,
+                )
+                self.assertEqual(
+                    db.query(AuditEvent).filter_by(
+                        action="SCRIPT_ALLOCATION_REVOKED",
+                        entity_id=duplicate_id,
+                    ).count(),
+                    1,
+                )
+        finally:
+            with self.SessionLocal() as db:
+                db.execute(
+                    text(
+                        "CREATE UNIQUE INDEX uq_allocations_active_script_evaluator "
+                        "ON allocations (script_id, evaluator_id) WHERE active = 1"
+                    )
+                )
+                db.commit()
 
         scripts = self.client.get(
             "/evaluator/scripts",
