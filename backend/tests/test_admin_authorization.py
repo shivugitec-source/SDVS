@@ -18,7 +18,7 @@ from sqlalchemy.pool import StaticPool
 
 from app.config import settings
 from app.db import Base, get_db
-from app.main import app, assigned_script, claim_otp_attempt, get_evaluation_for_update, get_otp_request_user_for_update, otp_digest
+from app.main import app, assigned_script, claim_otp_attempt, get_allocation_for_update, get_evaluation_for_update, get_otp_request_user_for_update, otp_digest
 from app.models import (Allocation, AuditEvent, Candidate, Evaluation, EvaluationScript, Examination, IdentityMapping, Institution, OTPChallenge, Question, QuestionMark, Role, Status, Subject, User, UserProfile)
 from app.security import create_token
 
@@ -1180,12 +1180,162 @@ class AdminAuthorizationTests(unittest.TestCase):
                 "question_mark_id": question_mark.id,
             }
 
-    def test_revoked_allocation_cannot_submit_a_saved_draft(self):
+    def test_exam_controller_can_revoke_allocation_and_repeated_revoke_is_idempotent(self):
         fixture = self._create_evaluation_assignment()
+        headers = {"Authorization": f"Bearer {self.exam_controller_token}"}
+
+        with patch(
+            "app.main.get_allocation_for_update",
+            wraps=get_allocation_for_update,
+        ) as allocation_lock:
+            first = self.client.post(
+                f"/allocations/{fixture['allocation_id']}/revoke",
+                headers=headers,
+            )
+        self.assertEqual(first.status_code, 200, first.text)
+        self.assertEqual(
+            first.json(),
+            {
+                "allocation_id": fixture["allocation_id"],
+                "active": False,
+                "revoked": True,
+            },
+        )
+        allocation_lock.assert_called_once()
+
         with self.SessionLocal() as db:
             allocation = db.get(Allocation, fixture["allocation_id"])
-            allocation.active = False
+            self.assertFalse(allocation.active)
+            events = db.query(AuditEvent).filter_by(
+                action="SCRIPT_ALLOCATION_REVOKED",
+                entity_id=fixture["allocation_id"],
+            ).all()
+            self.assertEqual(len(events), 1)
+            self.assertEqual(
+                json.loads(events[0].detail),
+                {
+                    "script_id": fixture["script_id"],
+                    "evaluator_id": self.evaluator_id,
+                },
+            )
+
+        second = self.client.post(
+            f"/allocations/{fixture['allocation_id']}/revoke",
+            headers=headers,
+        )
+        self.assertEqual(second.status_code, 200, second.text)
+        self.assertEqual(second.json()["revoked"], False)
+        with self.SessionLocal() as db:
+            self.assertEqual(
+                db.query(AuditEvent).filter_by(
+                    action="SCRIPT_ALLOCATION_REVOKED",
+                    entity_id=fixture["allocation_id"],
+                ).count(),
+                1,
+            )
+
+        scripts = self.client.get(
+            "/evaluator/scripts",
+            headers={"Authorization": f"Bearer {self.evaluator_token}"},
+        )
+        self.assertEqual(scripts.status_code, 200, scripts.text)
+        self.assertNotIn(fixture["script_id"], {item["script_id"] for item in scripts.json()})
+
+    def test_evaluator_cannot_revoke_an_allocation(self):
+        fixture = self._create_evaluation_assignment()
+        response = self.client.post(
+            f"/allocations/{fixture['allocation_id']}/revoke",
+            headers={"Authorization": f"Bearer {self.evaluator_token}"},
+        )
+        self.assertEqual(response.status_code, 403, response.text)
+        with self.SessionLocal() as db:
+            allocation = db.get(Allocation, fixture["allocation_id"])
+            self.assertTrue(allocation.active)
+            self.assertEqual(
+                db.query(AuditEvent).filter_by(
+                    action="SCRIPT_ALLOCATION_REVOKED",
+                    entity_id=fixture["allocation_id"],
+                ).count(),
+                0,
+            )
+
+    def test_allocation_revocation_is_scoped_to_the_actor_institution(self):
+        suffix = uuid.uuid4().hex
+        with self.SessionLocal() as db:
+            other_master = db.get(User, self.other_master_id)
+            other_institution_id = other_master.institution_id
+            other_evaluator = User(
+                institution_id=other_institution_id,
+                username=f"other-evaluator-{suffix}@example.test",
+                password_hash="not-used-by-this-test",
+                role=Role.EVALUATOR,
+            )
+            db.add(other_evaluator)
+            db.flush()
+            examination = Examination(
+                institution_id=other_institution_id,
+                name=f"Other institution exam {suffix}",
+                academic_year="2026-27",
+            )
+            db.add(examination)
+            db.flush()
+            subject = Subject(
+                examination_id=examination.id,
+                code=f"OTHER-{suffix[:8]}",
+                name="Other institution subject",
+                max_marks=10,
+            )
+            db.add(subject)
+            db.flush()
+            script = EvaluationScript(
+                institution_id=other_institution_id,
+                subject_id=subject.id,
+                anonymous_code=f"SDVS-{suffix[:12]}",
+                object_key="unused-other-institution.pdf",
+                pdf_sha256="0" * 64,
+                page_count=1,
+            )
+            db.add(script)
+            db.flush()
+            allocation = Allocation(
+                script_id=script.id,
+                evaluator_id=other_evaluator.id,
+                active=True,
+            )
+            db.add(allocation)
             db.commit()
+            allocation_id = allocation.id
+
+        response = self.client.post(
+            f"/allocations/{allocation_id}/revoke",
+            headers={"Authorization": f"Bearer {self.exam_controller_token}"},
+        )
+        self.assertEqual(response.status_code, 404, response.text)
+        self.assertEqual(response.json()["detail"], "Allocation not found")
+        with self.SessionLocal() as db:
+            self.assertTrue(db.get(Allocation, allocation_id).active)
+
+    def test_allocation_revocation_query_uses_postgresql_row_lock(self):
+        class RecordingSession:
+            statement = None
+
+            def scalar(self, statement):
+                self.statement = statement
+                return None
+
+        recorder = RecordingSession()
+        get_allocation_for_update(recorder, "allocation-lock-test")
+        sql = str(recorder.statement.compile(dialect=postgresql.dialect()))
+        self.assertIn("FOR UPDATE", sql.upper())
+        self.assertIn("allocations", sql.lower())
+
+    def test_revoked_allocation_cannot_submit_a_saved_draft(self):
+        fixture = self._create_evaluation_assignment()
+        revoked = self.client.post(
+            f"/allocations/{fixture['allocation_id']}/revoke",
+            headers={"Authorization": f"Bearer {self.exam_controller_token}"},
+        )
+        self.assertEqual(revoked.status_code, 200, revoked.text)
 
         response = self.client.post(
             f"/evaluations/{fixture['evaluation_id']}/submit",
@@ -1223,10 +1373,11 @@ class AdminAuthorizationTests(unittest.TestCase):
 
     def test_revoked_allocation_cannot_download_assigned_pdf(self):
         fixture = self._create_evaluation_assignment()
-        with self.SessionLocal() as db:
-            allocation = db.get(Allocation, fixture["allocation_id"])
-            allocation.active = False
-            db.commit()
+        revoked = self.client.post(
+            f"/allocations/{fixture['allocation_id']}/revoke",
+            headers={"Authorization": f"Bearer {self.exam_controller_token}"},
+        )
+        self.assertEqual(revoked.status_code, 200, revoked.text)
 
         with patch("app.main.get_object") as get_object:
             response = self.client.get(
