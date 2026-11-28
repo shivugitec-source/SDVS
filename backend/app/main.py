@@ -211,6 +211,47 @@ def allocate(body: AllocationIn, db: Session = Depends(get_db), user: User = Dep
     db.add(obj); db.flush(); audit(db, user, "SCRIPT_ALLOCATED", "allocation", obj.id); db.commit()
     return {"allocation_id": obj.id}
 
+def get_allocation_for_update(db: Session, allocation_id: str):
+    """Lock the allocation row shared by evaluator operations and revocation."""
+    return db.scalar(
+        select(Allocation)
+        .where(Allocation.id == allocation_id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
+
+
+@app.post("/allocations/{allocation_id}/revoke")
+def revoke_allocation(
+    allocation_id: str,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_roles("SUPER_ADMIN", "EXAM_CONTROLLER")),
+):
+    """Revoke an assignment after any in-flight evaluator operation releases its row lock."""
+    allocation = get_allocation_for_update(db, allocation_id)
+    if not allocation:
+        raise HTTPException(404, "Allocation not found")
+
+    script = db.get(EvaluationScript, allocation.script_id)
+    if not script or script.institution_id != user.institution_id:
+        raise HTTPException(404, "Allocation not found")
+
+    revoked = bool(allocation.active)
+    if revoked:
+        allocation.active = False
+        audit(
+            db,
+            user,
+            "SCRIPT_ALLOCATION_REVOKED",
+            "allocation",
+            allocation.id,
+            {"script_id": script.id, "evaluator_id": allocation.evaluator_id},
+        )
+        db.commit()
+
+    return {"allocation_id": allocation.id, "active": False, "revoked": revoked}
+
+
 @app.get("/evaluator/scripts")
 def my_scripts(db: Session = Depends(get_db), user: User = Depends(require_roles("EVALUATOR"))):
     # Serialize active-script listing with concurrent allocation revocation.
