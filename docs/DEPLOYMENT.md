@@ -1,67 +1,175 @@
-# SDVS deployment
+# SDVS deployment and controlled rollout
 
-## Hosting architecture
+## Deployment status — not deployed
 
-- Frontend: GitHub Pages, published from `docs/`.
-- API: Render Docker web service defined by `render.yaml`.
-- Database: Neon PostgreSQL through SQLAlchemy's psycopg 3 driver.
-- Answer-script PDFs: private Cloudflare R2 bucket through its S3-compatible API. The bucket must remain private; do not enable public access.
+The repository does **not** currently have a verified hosted FastAPI deployment or a verified institutional PostgreSQL/R2 environment. GitHub Pages publishes only the static files under `docs/`; it does not deploy the React/Vite evaluator application or the FastAPI API.
 
-## 1. Create the Neon database
+The Render Blueprint in `render.yaml` is a configuration template, not evidence that a Render service, database, storage bucket, or OTP provider exists. It does not provision PostgreSQL roles or run Alembic migrations.
 
-1. Open the Neon console and create a PostgreSQL project.
-2. Choose a region reasonably close to the Render Singapore service.
-3. From the project's Connect panel, copy the connection string.
-4. In Render, set `DATABASE_URL` to that connection string. Both `postgres://` and `postgresql://` are normalized by the application to the installed `postgresql+psycopg://` driver.
-5. Keep the connection string private. Never commit it to GitHub or paste it into chat.
+Do not create paid or external cloud resources, deploy the API, or use real student records without explicit project-owner approval. The steps below are an operator checklist for a separately approved deployment; they do not authorize one.
 
-## 2. Create the private Cloudflare R2 bucket
+## Current hosting boundaries
 
-1. In Cloudflare, open **Storage & databases → R2 Object Storage**.
-2. Create a bucket, for example `sdvs-private-answer-scripts`. Keep public access disabled.
-3. Under R2 API Tokens, create credentials with **Object Read & Write** permission scoped only to this bucket.
-4. Copy the S3 endpoint URL shown by Cloudflare. It has the form `https://<ACCOUNT_ID>.r2.cloudflarestorage.com`.
-5. In the Render service environment, set:
-   - `REQUIRE_R2=true`
-   - `R2_ENDPOINT_URL` = the Cloudflare S3 endpoint
-   - `R2_ACCESS_KEY_ID` = Access Key ID
-   - `R2_SECRET_ACCESS_KEY` = Secret Access Key
-   - `R2_BUCKET_NAME` = exact bucket name
+- **GitHub Pages:** publishes the offline browser prototype and static Master Admin API client from `docs/`. The offline prototype uses fictional sample data and browser-local IndexedDB.
+- **React/Vite evaluator application:** `frontend/` is type-checked and built in CI. A successful build is not a hosted deployment. Its evaluation workspace is not yet a complete end-to-end institutional workflow against the API.
+- **FastAPI API:** `backend/` contains authentication, authorization, valuation, PostgreSQL, and storage endpoints. No hosted API deployment is verified.
+- **PostgreSQL:** production schema changes use the versioned Alembic revisions `0001_initial`, `0002_immutability`, and `0003_runtime_identity_guards`.
+- **Answer-script storage:** hosted deployments must use a private S3-compatible Cloudflare R2 bucket with `REQUIRE_R2=true`. Do not enable public bucket access or expose object URLs.
 
-The API writes PDFs to R2 and streams them only after checking the evaluator's authenticated allocation. No public object URL is generated. Cloudflare R2 uses its S3-compatible API; see the official [R2 S3 documentation](https://developers.cloudflare.com/r2/get-started/s3/).
+The static Pages prototype is not connected to institutional records. Do not enter real candidate details or upload real answer scripts to it.
 
-## 3. Deploy the backend on Render
+## Preconditions before an approved deployment
 
-1. Sign in to Render and select **New → Blueprint**.
-2. Connect `shivugitec-source/SDVS`, branch `main`, and select the repository's `render.yaml`.
-3. Review the `sdvs-api` service. The Blueprint asks for private values rather than storing credentials in source.
-4. Set the following values in the Render service's Environment page (do not share them in chat):
-   - `DATABASE_URL`: Neon connection string
-   - `BOOTSTRAP_PASSWORD`: a unique, strong password for the initial administrator
-   - `BOOTSTRAP_EMAIL`: `shivugitec@gmail.com`
-   - `BOOTSTRAP_PHONE`: administrator's mobile in international format, e.g. `+91...`
-   - `SMTP_PASSWORD`: Gmail App Password for `shivugitec@gmail.com` (not the normal Gmail password)
-   - `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`, `TWILIO_FROM_NUMBER`: Twilio credentials and sender number
-   - the five R2 values listed in section 2
-5. Keep the generated `JWT_SECRET` and `OTP_SECRET` values private. The Blueprint creates them automatically.
-6. Deploy. The service must pass its `/health` check. A healthy response includes database and storage status.
-7. Copy the Render service's public HTTPS URL.
+A deployment operator must have an approved hosting plan, a dedicated PostgreSQL database, private object storage, HTTPS, backup/restore procedures, and approved SMTP/SMS delivery. Keep all passwords, API tokens, OTP secrets, and connection strings outside Git.
 
-The application intentionally fails startup if the JWT/OTP secrets are weak or required R2 configuration is missing. Do not disable `REQUIRE_R2` for a hosted deployment.
+### 1. Provision distinct PostgreSQL roles
 
-## 4. Connect the dashboard
+Use a dedicated SDVS database. The provisioning script changes ownership of objects in the `public` schema; do not run it against a shared database containing unrelated application objects without a separately reviewed plan.
 
-1. Open the [SDVS Master Admin page](https://shivugitec-source.github.io/SDVS/admin.html).
-2. Enter the Render HTTPS service URL in **Backend connection** and save it.
-3. Request both OTPs for `shivugitec@gmail.com`, then sign in.
-4. Create evaluator accounts only after verifying the first administrator can sign in and manage users.
+Generate three different strong passwords. The migrator and runtime passwords must each contain at least 32 characters. The script receives the bootstrap database administrator through standard PostgreSQL environment variables and the two service passwords through `SDVS_MIGRATOR_PASSWORD` and `SDVS_APP_PASSWORD`.
 
-## 5. Current implementation and important limits
+From the repository root, in a secured operator environment:
 
-- R2 upload and authenticated PDF retrieval are integrated in the API.
-- The API checks PostgreSQL and R2 from `/health`.
-- The frontend dashboard still uses browser-local IndexedDB for its current PDF/evaluation workspace; it is not yet wired end-to-end to the backend APIs. The secure backend APIs are a separate service layer at this stage.
-- `Base.metadata.create_all` is still used at startup; versioned database migrations must be added before schema evolution in production.
-- OTP controls need a further security review and integration tests before handling high-stakes examinations.
-- Render free services may sleep when idle. SMS delivery requires a configured provider and may incur charges.
-- Do not upload real student answer scripts until the dashboard-to-API workflow, role boundaries, audit trail, retention policy, and backups have been tested end-to-end.
+```sh
+export PGHOST='database-host'
+export PGPORT='5432'
+export PGDATABASE='sdvs'
+export PGUSER='bootstrap-admin'
+export PGPASSWORD='bootstrap-admin-password'
+export SDVS_MIGRATOR_PASSWORD='distinct-migrator-password-at-least-32-chars'
+export SDVS_APP_PASSWORD='different-runtime-password-at-least-32-chars'
+
+psql -v ON_ERROR_STOP=1 -f backend/sql/provision_roles.sql
+```
+
+Use real generated values only in the secured environment; the values above are examples, not credentials. Never commit a populated environment file.
+
+The resulting identities are:
+
+| Role | Purpose |
+|---|---|
+| Bootstrap database administrator | One-time role/object provisioning; never used by the API |
+| `sdvs_migrator` | Non-superuser schema owner used for Alembic |
+| `sdvs_app` | Restricted FastAPI runtime identity |
+
+The API must never receive the bootstrap or migrator password.
+
+### 2. Apply migrations to a fresh database
+
+Run migrations as `sdvs_migrator`, not as the bootstrap administrator or `sdvs_app`:
+
+```sh
+cd backend
+export DATABASE_URL='postgresql+psycopg://sdvs_migrator:...@database-host:5432/sdvs'
+alembic upgrade head
+alembic current
+alembic check
+python scripts/verify_migrations.py
+```
+
+The current head is `0003_runtime_identity_guards`. The verification script checks valuation immutability, enabled trigger definitions, and submitted-versus-draft mutation behaviour.
+
+### 3. Adopt an existing pre-Alembic database safely
+
+Do not run the normal migration service against an unversioned legacy database first.
+
+1. Stop application writes and take a backup.
+2. Verify that the backup can be restored.
+3. Connect as `sdvs_migrator` and run the read-only parity check:
+
+   ```sh
+   cd backend
+   export DATABASE_URL='postgresql+psycopg://sdvs_migrator:...@database-host:5432/sdvs'
+   python scripts/check_schema_parity.py
+   ```
+
+4. Continue only if the checker reports an exact match to the `0001_initial` baseline:
+
+   ```sh
+   alembic stamp 0001_initial
+   alembic upgrade head
+   alembic current
+   alembic check
+   python scripts/verify_migrations.py
+   ```
+
+If the parity check reports any difference, stop. Do not stamp the database to hide schema drift. Prepare and review a data-preserving forward migration first.
+
+The downgrade for `0001_initial` drops SDVS tables. CI uses downgrade only on disposable PostgreSQL. It is **not** a production rollback plan; production recovery requires a separately tested backup/restore or reviewed forward-fix procedure.
+
+### 4. Verify the restricted runtime identity
+
+Before starting the API, run the runtime privilege verification using the `sdvs_app` connection:
+
+```sh
+cd backend
+export DATABASE_URL='postgresql+psycopg://sdvs_app:...@database-host:5432/sdvs'
+python scripts/verify_runtime_privileges.py
+```
+
+The API's PostgreSQL startup guard also requires:
+
+- Current Alembic head.
+- Connection as `sdvs_app`.
+- Non-superuser and non-owner runtime privileges.
+- No schema DDL or migration-role membership.
+- Required runtime DML and row-lock privileges.
+- Enabled valuation immutability and user/profile identity triggers.
+
+If the guard fails, do not bypass it or run the API as a superuser. Correct provisioning or migration state.
+
+### 5. Configure API secrets, OTP delivery, and private storage
+
+Use unique random values for `JWT_SECRET` and `OTP_SECRET` (at least 32 characters). Configure SMTP and Twilio with credentials held in the hosting provider's secret store. Never put secrets in Vite variables, HTML, GitHub Pages, or source control.
+
+For hosted PDF storage:
+
+- Set `REQUIRE_R2=true`.
+- Configure the R2 endpoint, access key, secret key, and bucket name.
+- Scope the R2 token to the one private bucket with only the required object read/write access.
+- Keep public bucket access disabled.
+- Do not rely on an ephemeral container filesystem for answer scripts.
+
+The API streams PDFs only after checking the authenticated evaluator's allocation. That backend control does not replace end-to-end testing of the evaluator workflow.
+
+### 6. Bootstrap the first SDVS administrator deliberately
+
+The Render template defaults `DEV_BOOTSTRAP=false`. Keep it false during normal operation.
+
+Only during an approved first-time bootstrap, set `DEV_BOOTSTRAP=true` with a unique bootstrap username, strong temporary password, administrator name, registered email, and E.164 mobile number. Start the API, verify that the intended administrator was created and can complete both OTP channels, then immediately set `DEV_BOOTSTRAP=false` and restart/redeploy.
+
+Do not leave bootstrap mode enabled as a standing production setting. Do not use a personal address or phone number as a source-code default.
+
+## Render Blueprint limitations
+
+`render.yaml` describes only the API web service. It does **not** create the PostgreSQL database, provision `sdvs_app`/`sdvs_migrator`, apply Alembic migrations, create the R2 bucket, or configure SMTP/Twilio accounts.
+
+Before any manually approved Render service deployment:
+
+1. Complete database role provisioning and migrations outside the API service using the controlled procedure above.
+2. Set the Render `DATABASE_URL` to the `sdvs_app` runtime connection string only.
+3. Supply the approved JWT/OTP, SMTP, Twilio, and private R2 settings.
+4. Confirm that the schema and runtime privilege verification pass.
+5. Obtain explicit approval before creating or deploying the cloud service.
+
+The Blueprint has `autoDeploy: false` and `DEV_BOOTSTRAP=false` by default to prevent unattended deployment and persistent bootstrap mode. A manual deployment is still a cloud deployment and requires approval.
+
+## Post-deployment acceptance — not yet demonstrated
+
+After a separately approved deployment, verify at minimum:
+
+- `/health` reports database and private storage availability.
+- Email and mobile OTPs are delivered through the approved providers.
+- JWT is issued only after both channels verify.
+- EVALUATOR accounts cannot access administrative routes.
+- An evaluator can see only their active allocations.
+- PDF retrieval checks the authenticated allocation and returns the expected private object.
+- Draft marks can be saved; submitted marks and evaluations cannot be changed or deleted.
+- User identity/role changes and audit-log mutation are denied to the runtime database role.
+- Audit retention, backup, restoration, incident response, and institutional data-retention rules are tested.
+
+The React evaluator workspace is not yet a complete end-to-end institutional workflow against the backend. Do not upload real student answer scripts or declare the system operational until that integration, role boundaries, privacy review, security testing, retention, and disaster recovery have been validated.
+
+## Deployment evidence
+
+A GitHub Pages workflow success proves only that the static `docs/` artifact was deployed. A backend CI success proves only that the code and disposable PostgreSQL tests passed. Neither is evidence of a live Render service, hosted database, R2 bucket, real OTP delivery, or end-to-end examination valuation.
