@@ -67,7 +67,13 @@ class AdminAuthorizationTests(unittest.TestCase):
                 password_hash="not-used-by-this-test",
                 role=Role.SUPER_ADMIN,
             )
-            db.add_all([master, evaluator, inactive_master, other_master])
+            exam_controller = User(
+                institution_id=institution.id,
+                username="exam-controller@example.test",
+                password_hash="not-used-by-this-test",
+                role=Role.EXAM_CONTROLLER,
+            )
+            db.add_all([master, evaluator, inactive_master, other_master, exam_controller])
             db.flush()
 
             db.add_all([
@@ -95,6 +101,12 @@ class AdminAuthorizationTests(unittest.TestCase):
                     email="master-b@example.test",
                     phone="+919000000004",
                 ),
+                UserProfile(
+                    user_id=exam_controller.id,
+                    full_name="Fictional Exam Controller",
+                    email="exam-controller@example.test",
+                    phone="+919000000005",
+                ),
             ])
             db.commit()
 
@@ -102,10 +114,12 @@ class AdminAuthorizationTests(unittest.TestCase):
             cls.evaluator_id = evaluator.id
             cls.inactive_master_id = inactive_master.id
             cls.other_master_id = other_master.id
+            cls.exam_controller_id = exam_controller.id
             cls.institution_id = institution.id
             cls.master_token = create_token(master)
             cls.evaluator_token = create_token(evaluator)
             cls.inactive_token = create_token(inactive_master)
+            cls.exam_controller_token = create_token(exam_controller)
 
         def override_get_db():
             with cls.SessionLocal() as db:
@@ -150,6 +164,70 @@ class AdminAuthorizationTests(unittest.TestCase):
             headers={"Authorization": f"Bearer {self.evaluator_token}"},
         )
         self.assertEqual(response.status_code, 403)
+
+    def test_evaluator_creation_creates_otp_ready_profile_for_exam_controller(self):
+        suffix = uuid.uuid4().hex[:8]
+        email = f"evaluator-{suffix}@example.test"
+        phone = f"+9198{suffix[:8].ljust(8, '0')}"
+        response = self.client.post(
+            "/users/evaluators",
+            json={
+                "full_name": "Fictional OTP Evaluator",
+                "email": email,
+                "phone": phone,
+            },
+            headers={"Authorization": f"Bearer {self.exam_controller_token}"},
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+        payload = response.json()
+        self.assertEqual(payload["email"], email)
+        self.assertEqual(payload["phone"], phone)
+        self.assertEqual(payload["role"], "EVALUATOR")
+        self.assertNotIn("password", payload)
+        self.assertNotIn("password_hash", payload)
+
+        with self.SessionLocal() as db:
+            account = db.query(User).filter_by(
+                institution_id=self.institution_id, username=email
+            ).one()
+            profile = db.query(UserProfile).filter_by(user_id=account.id).one()
+            self.assertEqual(account.role, Role.EVALUATOR)
+            self.assertTrue(account.active)
+            self.assertEqual(profile.full_name, "Fictional OTP Evaluator")
+            self.assertEqual(profile.email, email)
+            self.assertEqual(profile.phone, phone)
+            self.assertFalse(profile.email_verified)
+            self.assertFalse(profile.phone_verified)
+            event = db.query(AuditEvent).filter_by(
+                action="EVALUATOR_CREATED", entity_id=account.id
+            ).one()
+            self.assertEqual(json.loads(event.detail), {
+                "email": email, "role": "EVALUATOR"
+            })
+
+    def test_evaluator_creation_rejects_legacy_password_only_contract(self):
+        response = self.client.post(
+            "/users/evaluators",
+            data={"username": "legacy-evaluator", "password": "not-used-12345"},
+            headers={"Authorization": f"Bearer {self.master_token}"},
+        )
+        self.assertEqual(response.status_code, 422, response.text)
+        with self.SessionLocal() as db:
+            self.assertIsNone(db.query(User).filter_by(
+                institution_id=self.institution_id, username="legacy-evaluator"
+            ).first())
+
+    def test_evaluator_cannot_create_evaluator_accounts(self):
+        response = self.client.post(
+            "/users/evaluators",
+            json={
+                "full_name": "Unauthorized Evaluator",
+                "email": "unauthorized-evaluator@example.test",
+                "phone": "+919876543210",
+            },
+            headers={"Authorization": f"Bearer {self.evaluator_token}"},
+        )
+        self.assertEqual(response.status_code, 403, response.text)
 
     def test_evaluator_cannot_read_unassigned_subject_rubric(self):
         fixture = self._create_evaluation_assignment()
