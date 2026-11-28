@@ -1317,6 +1317,14 @@ class AdminAuthorizationTests(unittest.TestCase):
                 )
         finally:
             with self.SessionLocal() as db:
+                # Restore the test database invariant even if an assertion fails.
+                db.execute(
+                    text(
+                        "UPDATE allocations SET active = false "
+                        "WHERE script_id = :script_id AND evaluator_id = :evaluator_id"
+                    ),
+                    {"script_id": fixture["script_id"], "evaluator_id": self.evaluator_id},
+                )
                 db.execute(
                     text(
                         "CREATE UNIQUE INDEX uq_allocations_active_script_evaluator "
