@@ -10,7 +10,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: \${{ github.workflow }}-\${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
@@ -66,12 +66,21 @@ jobs:
           assert get_object(key) == b"sdvs-ci-roundtrip"
           print("Local storage adapter round-trip passed.")
           PY
-      - name: Validate PostgreSQL migration lifecycle
+      - name: Provision restricted PostgreSQL roles
         working-directory: backend
         env:
-          JWT_SECRET: ci-only-secret-not-for-production
-          OTP_SECRET: ci-only-otp-secret
-          DATABASE_URL: postgresql+psycopg://postgres:sdvs-ci-only@127.0.0.1:5432/sdvs_test
+          PGHOST: 127.0.0.1
+          PGPORT: "5432"
+          PGDATABASE: sdvs_test
+          PGUSER: postgres
+          PGPASSWORD: sdvs-ci-only
+          SDVS_MIGRATOR_PASSWORD: sdvs-migrator-ci-only
+          SDVS_APP_PASSWORD: sdvs-app-ci-only
+        run: psql -v ON_ERROR_STOP=1 -f sql/provision_roles.sql
+      - name: Validate PostgreSQL migration lifecycle as sdvs_migrator
+        working-directory: backend
+        env:
+          DATABASE_URL: postgresql+psycopg://sdvs_migrator:sdvs-migrator-ci-only@127.0.0.1:5432/sdvs_test
         run: |
           alembic upgrade head
           alembic current
@@ -90,10 +99,15 @@ jobs:
           alembic current
           alembic check
           python scripts/verify_migrations.py
+      - name: Verify restricted PostgreSQL runtime privileges as sdvs_app
+        working-directory: backend
+        env:
+          DATABASE_URL: postgresql+psycopg://sdvs_app:sdvs-app-ci-only@127.0.0.1:5432/sdvs_test
+        run: python scripts/verify_runtime_privileges.py
       - name: Run backend authorization integration tests
         working-directory: backend
         env:
           JWT_SECRET: ci-only-secret-not-for-production
           OTP_SECRET: ci-only-otp-secret
-          DATABASE_URL: postgresql+psycopg://postgres:sdvs-ci-only@127.0.0.1:5432/sdvs_test
+          DATABASE_URL: postgresql+psycopg://sdvs_app:sdvs-app-ci-only@127.0.0.1:5432/sdvs_test
         run: python -m unittest discover -s tests -v

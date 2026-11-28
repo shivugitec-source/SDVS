@@ -25,42 +25,76 @@ The GitHub Pages workflow publishes only docs/. It publishes the offline dashboa
 
 ## Local development
 
-1. Copy .env.example to .env and replace all development secrets.
-2. Start PostgreSQL and API: docker compose up --build.
-3. Start the connected evaluator frontend: cd frontend && npm ci && npm run dev.
-4. The evaluator frontend defaults to http://localhost:8000 for its API. Set VITE_API_URL when using a different local API address; never put credentials or secrets in Vite variables.
-5. API documentation: http://localhost:8000/docs.
-6. Frontend: http://localhost:5173.
+1. Copy `.env.example` to `.env` and replace every placeholder.
+2. Generate three distinct database passwords, for example with `openssl rand -hex 32`: `POSTGRES_PASSWORD`, `SDVS_MIGRATOR_PASSWORD`, and `SDVS_APP_PASSWORD`. Keep them different.
+3. Replace `JWT_SECRET`, `OTP_SECRET`, bootstrap credentials, and any SMTP/Twilio placeholders.
+4. Start PostgreSQL, role provisioning, migrations, and API with `docker compose up --build`.
+5. Start the connected evaluator frontend: `cd frontend && npm ci && npm run dev`.
+6. The evaluator frontend defaults to `http://localhost:8000` for its API. Set `VITE_API_URL` when using a different local API address; never put credentials or secrets in Vite variables.
+7. API documentation: `http://localhost:8000/docs`; frontend: `http://localhost:5173`.
 
-## Database migrations
+Compose deliberately separates database credentials:
+
+- `devs` is the bootstrap PostgreSQL administrator. Only the short-lived `provision` service receives its password.
+- `sdvs_migrator` is a non-superuser owner of the SDVS schema and is used only by the Alembic migration service.
+- `sdvs_app` is the API runtime role. It has application DML privileges but no schema DDL, trigger administration, or Alembic version-table mutation.
+
+The API container does not receive the bootstrap or migrator passwords. The migration container does not receive the bootstrap or runtime passwords.
+
+## Database migrations and PostgreSQL roles
 
 PostgreSQL schema changes are versioned with Alembic. The initial baseline creates the 14 current ORM tables and indexes; the next revision installs PostgreSQL triggers that reject mutation or deletion of submitted/approved evaluations and their marks.
 
-- Fresh local Compose databases are migrated by the one-shot \`migrate\` service before the API starts.
-- SQLite remains a local-development-only path and may create its schema from ORM metadata.
-- PostgreSQL API startup does **not** call \`Base.metadata.create_all\`. It requires the current Alembic head and verifies both immutability triggers.
-- Production deployments must run migrations as an explicit, backed-up release step (for example, \`alembic upgrade head\`) before starting the API. The API does not run migrations automatically.
+### Separate database roles
+
+| Role | Purpose | Privileges |
+|---|---|---|
+| `devs` | Bootstrap administrator used only for provisioning | Database administration; never used by API or migration services |
+| `sdvs_migrator` | Alembic migration identity and schema owner | Non-superuser DDL on the SDVS `public` schema |
+| `sdvs_app` | FastAPI runtime identity | Required application DML; no schema DDL or trigger administration |
+
+The `provision` service executes `backend/sql/provision_roles.sql` as the bootstrap administrator. It creates or updates the two service roles, removes role memberships, transfers existing SDVS objects in the dedicated `public` schema to `sdvs_migrator`, and configures grants/default privileges. Review this script before using it against a database that contains non-SDVS objects.
+
+After every migration, `backend/migrations/env.py` grants runtime DML to `sdvs_app` and reapplies sensitive-table restrictions:
+
+- `sdvs_app` can update only `users.active`, not user roles or password hashes.
+- `sdvs_app` can update only `user_profiles.email_verified` and `phone_verified`, not registered email or phone values.
+- Audit events are readable and insertable but cannot be updated or deleted by the runtime role.
+- `alembic_version` is readable by the API but cannot be modified by it.
+- The runtime role cannot create schema objects, own application tables, or disable valuation triggers.
+
+Alembic refuses to run unless connected as the non-superuser `sdvs_migrator` schema owner. PostgreSQL API startup refuses to run unless connected as the restricted `sdvs_app` role and verifies the expected grants and enabled immutability triggers.
+
+### Fresh Compose database
+
+Run `docker compose up --build`. Compose starts PostgreSQL, provisions the three-role model, applies `alembic upgrade head` as `sdvs_migrator`, and only then starts the API as `sdvs_app`.
+
+### Existing Compose volume
+
+If an older volume was initialized with a previous `devs` password, `POSTGRES_PASSWORD` must initially match the password already stored in PostgreSQL. Start the database, connect with `docker compose exec db psql -U devs -d devs`, rotate the password using the interactive `\\password devs` command, then update `POSTGRES_PASSWORD` in `.env` to that new value. Do not leave the old development password in place.
+
+The provisioning service is idempotent and transfers ownership of existing objects in the dedicated `public` schema to `sdvs_migrator`. Take a verified backup and inspect custom objects before running it on an existing or shared database.
 
 ### Adopting a pre-Alembic PostgreSQL database
 
-Do not run the initial migration blindly against an existing database. Stop application writes and take a verified backup first.
+Do not let the normal migration service run against an unversioned legacy database before checking parity. Stop application writes and take a verified backup first. Then:
 
-1. Run \`python scripts/check_schema_parity.py\` against the existing database. This is read-only and compares tables, columns, indexes, constraints and types with the initial baseline.
-2. Continue only if it reports an exact match. Then run \`alembic stamp 0001_initial\` to record the existing schema without recreating tables.
-3. Run \`alembic upgrade head\` to install the versioned immutability-trigger revision.
-4. Run \`alembic check\` and verify application startup.
+1. Start only PostgreSQL: `docker compose up -d db`.
+2. Provision roles and transfer schema ownership: `docker compose run --rm provision`.
+3. Run the read-only parity check as `sdvs_migrator`: `docker compose run --rm migrate python scripts/check_schema_parity.py`.
+4. Continue only if the checker reports an exact match. Then run `docker compose run --rm migrate alembic stamp 0001_initial`.
+5. Apply the remaining revision: `docker compose run --rm migrate alembic upgrade head`.
+6. Start the application: `docker compose up --build`.
 
-For Docker Compose, the equivalent preflight commands are:
+If the parity check reports any difference, stop. Do not stamp the database to hide drift; prepare and review a data-preserving forward migration for that schema first.
 
-\`\`\`sh
-docker compose run --rm migrate python scripts/check_schema_parity.py
-docker compose run --rm migrate alembic stamp 0001_initial
-docker compose run --rm migrate alembic upgrade head
-\`\`\`
+### Production migration procedure
 
-If the parity check reports any difference, stop. Do not stamp the database to hide drift; prepare and review a data-preserving forward migration for that schema first. Existing production databases require a separately reviewed backup/restore and migration plan.
+Provision the roles as a controlled database-administration step. Run `alembic upgrade head` with `DATABASE_URL` set to the `sdvs_migrator` connection, then run `python scripts/verify_runtime_privileges.py` with `DATABASE_URL` set to `sdvs_app`. The API must receive only the runtime connection string; never inject bootstrap or migration credentials into the API process.
 
-The initial revision's downgrade drops the SDVS tables and is destructive. CI exercises downgrade only against its disposable PostgreSQL service; do not use \`alembic downgrade base\` as a production rollback procedure.
+SQLite remains a local-development-only path and may create its schema from ORM metadata. PostgreSQL API startup does not call `Base.metadata.create_all`; it requires the current Alembic head and validates the runtime role and both immutability triggers.
+
+The initial revision's downgrade drops SDVS tables and is destructive. CI exercises downgrade only against its disposable PostgreSQL service; do not use `alembic downgrade base` as a production rollback procedure. Production requires a separately reviewed backup/restore and forward-migration plan.
 
 ## Security and production-readiness notice
 
