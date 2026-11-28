@@ -294,7 +294,7 @@ class AdminAuthorizationTests(unittest.TestCase):
         returned_ids = {item["id"] for item in response.json()}
         self.assertEqual(
             returned_ids,
-            {self.master_id, self.evaluator_id, self.inactive_master_id},
+            {self.master_id, self.evaluator_id, self.inactive_master_id, self.exam_controller_id},
         )
         self.assertNotIn(self.other_master_id, returned_ids)
 
