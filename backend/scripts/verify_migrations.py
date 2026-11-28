@@ -1,4 +1,4 @@
-"""Verify PostgreSQL migration head and submitted-valuation immutability triggers."""
+"""Verify PostgreSQL migration head, valuation immutability, and allocation uniqueness."""
 import re
 import sys
 import uuid
@@ -37,7 +37,6 @@ def _verify_disabled_trigger_fails_closed() -> None:
         try:
             try:
                 _verify_postgres_triggers(connection)
-        _verify_active_allocation_unique_index(connection)
             except RuntimeError as exc:
                 if "trg_sdvs_immutable_marks is disabled" not in str(exc):
                     raise
@@ -68,7 +67,7 @@ def _verify_active_allocation_unique_index(connection) -> None:
     if row is None:
         raise AssertionError("Active-allocation unique index is missing.")
     definition = str(row["definition"]).lower()
-    predicate = re.sub(r"[\\s()\\\"]+", "", str(row["predicate"]).lower())
+    predicate = re.sub(r"[\s()\"]+", "", str(row["predicate"]).lower())
     if not row["indisunique"]:
         raise AssertionError("Active-allocation index is not unique.")
     if "script_id, evaluator_id" not in definition or predicate != "activeistrue":
@@ -94,6 +93,7 @@ def main() -> int:
     with engine.connect() as connection:
         revision = connection.execute(text("SELECT version_num FROM alembic_version")).scalar_one()
         _verify_postgres_triggers(connection)
+        _verify_active_allocation_unique_index(connection)
     alembic_config = Config(str(Path(__file__).resolve().parents[1] / "alembic.ini"))
     expected_revision = ScriptDirectory.from_config(alembic_config).get_current_head()
     if revision != expected_revision:
