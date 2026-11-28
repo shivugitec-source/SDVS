@@ -134,6 +134,28 @@ REVOKE ALL ON ALL SEQUENCES IN SCHEMA public FROM PUBLIC;
 GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO sdvs_app;
 GRANT USAGE, SELECT, UPDATE ON ALL SEQUENCES IN SCHEMA public TO sdvs_app;
 
+-- Keep the sensitive-table restrictions in force even when provisioning is
+-- re-run independently of the migration service.
+DO $
+BEGIN
+    IF to_regclass('public.users') IS NOT NULL THEN
+        EXECUTE 'REVOKE UPDATE, DELETE ON TABLE public.users FROM sdvs_app';
+        EXECUTE 'GRANT UPDATE (active) ON TABLE public.users TO sdvs_app';
+    END IF;
+    IF to_regclass('public.user_profiles') IS NOT NULL THEN
+        EXECUTE 'REVOKE UPDATE, DELETE ON TABLE public.user_profiles FROM sdvs_app';
+        EXECUTE 'GRANT UPDATE (email_verified, phone_verified) ON TABLE public.user_profiles TO sdvs_app';
+    END IF;
+    IF to_regclass('public.audit_events') IS NOT NULL THEN
+        EXECUTE 'REVOKE UPDATE, DELETE ON TABLE public.audit_events FROM sdvs_app';
+    END IF;
+    IF to_regclass('public.alembic_version') IS NOT NULL THEN
+        EXECUTE 'REVOKE INSERT, UPDATE, DELETE ON TABLE public.alembic_version FROM sdvs_app';
+        EXECUTE 'GRANT SELECT ON TABLE public.alembic_version TO sdvs_app';
+    END IF;
+END
+$;
+
 ALTER DEFAULT PRIVILEGES FOR ROLE sdvs_migrator IN SCHEMA public
     REVOKE ALL ON TABLES FROM PUBLIC;
 ALTER DEFAULT PRIVILEGES FOR ROLE sdvs_migrator IN SCHEMA public

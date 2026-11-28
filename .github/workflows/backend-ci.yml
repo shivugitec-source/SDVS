@@ -10,7 +10,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: \${{ github.workflow }}-\${{ github.ref }}
+  group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
@@ -34,6 +34,28 @@ jobs:
     steps:
       - name: Check out source
         uses: actions/checkout@v7
+      - name: Validate Compose configuration and credential boundaries
+        run: |
+          cp .env.example .env
+          trap 'rm -f .env /tmp/sdvs-compose.json' EXIT
+          docker compose config --format json > /tmp/sdvs-compose.json
+          python - <<'PY'
+          import json
+          with open("/tmp/sdvs-compose.json", encoding="utf-8") as handle:
+              config = json.load(handle)
+          services = config["services"]
+          api = services["api"]["environment"]
+          migrate = services["migrate"]["environment"]
+          provision = services["provision"]["environment"]
+          assert "POSTGRES_PASSWORD" not in api
+          assert "SDVS_MIGRATOR_PASSWORD" not in api
+          assert "POSTGRES_PASSWORD" not in migrate
+          assert "SDVS_APP_PASSWORD" not in migrate
+          assert "PGPASSWORD" in provision
+          assert "SDVS_MIGRATOR_PASSWORD" in provision
+          assert "SDVS_APP_PASSWORD" in provision
+          print("Compose configuration valid; bootstrap and migration credentials are isolated from the API.")
+          PY
       - name: Set up Python
         uses: actions/setup-python@v7
         with:
@@ -74,13 +96,13 @@ jobs:
           PGDATABASE: sdvs_test
           PGUSER: postgres
           PGPASSWORD: sdvs-ci-only
-          SDVS_MIGRATOR_PASSWORD: sdvs-migrator-ci-only
-          SDVS_APP_PASSWORD: sdvs-app-ci-only
+          SDVS_MIGRATOR_PASSWORD: sdvs-migrator-ci-only-0123456789abcdef
+          SDVS_APP_PASSWORD: sdvs-app-ci-only-0123456789abcdef
         run: psql -v ON_ERROR_STOP=1 -f sql/provision_roles.sql
       - name: Validate PostgreSQL migration lifecycle as sdvs_migrator
         working-directory: backend
         env:
-          DATABASE_URL: postgresql+psycopg://sdvs_migrator:sdvs-migrator-ci-only@127.0.0.1:5432/sdvs_test
+          DATABASE_URL: postgresql+psycopg://sdvs_migrator:sdvs-migrator-ci-only-0123456789abcdef@127.0.0.1:5432/sdvs_test
         run: |
           alembic upgrade head
           alembic current
@@ -102,12 +124,12 @@ jobs:
       - name: Verify restricted PostgreSQL runtime privileges as sdvs_app
         working-directory: backend
         env:
-          DATABASE_URL: postgresql+psycopg://sdvs_app:sdvs-app-ci-only@127.0.0.1:5432/sdvs_test
+          DATABASE_URL: postgresql+psycopg://sdvs_app:sdvs-app-ci-only-0123456789abcdef@127.0.0.1:5432/sdvs_test
         run: python scripts/verify_runtime_privileges.py
       - name: Run backend authorization integration tests
         working-directory: backend
         env:
           JWT_SECRET: ci-only-secret-not-for-production
           OTP_SECRET: ci-only-otp-secret
-          DATABASE_URL: postgresql+psycopg://sdvs_app:sdvs-app-ci-only@127.0.0.1:5432/sdvs_test
+          DATABASE_URL: postgresql+psycopg://sdvs_app:sdvs-app-ci-only-0123456789abcdef@127.0.0.1:5432/sdvs_test
         run: python -m unittest discover -s tests -v
