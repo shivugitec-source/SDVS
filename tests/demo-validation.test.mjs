@@ -535,3 +535,29 @@ test("admin API status messages render untrusted response text without HTML inte
   assert.equal(target.children[0].className, "status err");
   assert.equal(target.children[0].innerHTML, undefined);
 });
+
+
+const deploymentGuide = await readFile(new URL("../docs/DEPLOYMENT.md", import.meta.url), "utf8");
+const renderBlueprint = await readFile(new URL("../render.yaml", import.meta.url), "utf8");
+
+test("deployment guide reflects the implemented PostgreSQL migration and role model", () => {
+  assert.match(deploymentGuide, /does \*\*not\*\* currently have a verified hosted FastAPI deployment/i);
+  for (const revision of ["0001_initial", "0002_immutability", "0003_runtime_identity_guards"]) {
+    assert.ok(deploymentGuide.includes(revision), `Deployment guide must document migration ${revision}.`);
+  }
+  assert.match(deploymentGuide, /sdvs_migrator/);
+  assert.match(deploymentGuide, /sdvs_app/);
+  assert.match(deploymentGuide, /check_schema_parity\.py/);
+  assert.match(deploymentGuide, /verify_runtime_privileges\.py/);
+  assert.match(deploymentGuide, /Do not create paid or external cloud resources.*without explicit project-owner approval/s);
+  assert.doesNotMatch(deploymentGuide, /Base\.metadata\.create_all.*still used at startup/i);
+  assert.doesNotMatch(deploymentGuide, /versioned database migrations must be added/i);
+});
+
+test("Render blueprint requires manual deployment and disables bootstrap by default", () => {
+  assert.match(renderBlueprint, /^\s*autoDeploy: false$/m);
+  assert.match(renderBlueprint, /key: DEV_BOOTSTRAP\s+value: "false"/);
+  assert.match(renderBlueprint, /key: DATABASE_URL\s+sync: false/);
+  assert.match(deploymentGuide, /restricted sdvs_app connection string/i);
+  assert.doesNotMatch(renderBlueprint, /shivugitec@gmail\.com|Shivanand/);
+});
